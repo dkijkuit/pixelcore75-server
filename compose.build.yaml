@@ -1,0 +1,20 @@
+pixelcore75-server:
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      JDK_VERSION: "21"
+  image: pixelcore75-server:latest
+  environment:
+    SERVER_PORT: "8080"
+    JAVA_OPTS: ""
+
+  ports:
+    - "8080:8080"
+  healthcheck:
+    test: [ "CMD-SHELL", "wget -qO- http://localhost:${SERVER_PORT} || exit 1" ]
+    interval: 30s
+    timeout: 5s
+    start_period: 15s
+    retries: 3
+  restart: unless-stopped

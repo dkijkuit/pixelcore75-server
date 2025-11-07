@@ -1,0 +1,36 @@
+name: pixelcore75
+services:
+  nanomq:
+    container_name: nanomq
+    ports:
+      - 1883:1883
+      - 8083:8083
+      - 8883:8883
+      - 8081:8081
+    image: emqx/nanomq:latest
+    environment:
+      - "NANOMQ_HTTP_SERVER_ENABLE=true"
+      - "NANOMQ_HTTP_SERVER_USERNAME=pxcore75"
+      - "NANOMQ_HTTP_SERVER_PASSWORD=pass123"
+      - "NANOMQ_HTTP_AUTH_TYPE=basic"
+
+  mqttx-web:
+    container_name: mqttx-web
+    ports:
+      - 8090:80
+    image: emqx/mqttx-web
+
+  db:
+    image: postgres:17.6
+    restart: always
+    environment:
+      POSTGRES_USER: pixelcore75
+      POSTGRES_PASSWORD: difficultpassword
+      POSTGRES_DB: pixelcore75
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+volumes:
+  db_data:

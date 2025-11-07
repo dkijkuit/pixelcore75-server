@@ -1,0 +1,29 @@
+{
+  "properties": [
+    {
+      "name": "pixelcore75.crypto.client",
+      "type": "nl.ctasoftware.crypto.ticker.server.service.screen.crypto.client.CryptoClientType",
+      "description": "Crypto API client to use."
+    },
+    {
+      "name": "pixelcore75.crypto.apikey",
+      "type": "java.lang.String",
+      "description": "Crypto client API KEY to use."
+    },
+    {
+      "name": "pixelcore75.crypto.currency",
+      "type": "nl.ctasoftware.crypto.ticker.server.service.screen.crypto.client.CryptoClientCurrency",
+      "description": "Set the currency in uppercase for which the price information should be retrieved."
+    },
+    {
+      "name": "pixelcore75.soccer.client",
+      "type": "java.lang.String",
+      "description": "Sets the client for the soccer API."
+    },
+    {
+      "name": "pixelcore75.soccer.basePath",
+      "type": "java.lang.String",
+      "description": "Sets the client base path."
+    }
+  ]
+}
