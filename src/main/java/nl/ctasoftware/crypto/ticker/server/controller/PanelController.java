@@ -125,7 +125,6 @@ public class PanelController {
     @DeleteMapping("/{panelId}")
     public ResponseEntity<Void> delete(@PathVariable long panelId,
                                        @AuthenticationPrincipal Px75User user) {
-        // If non-admins should only delete their own panels, enforce here:
         px75PanelService.deletePanel(panelId, user);
         return ResponseEntity.noContent().build(); // 204
     }

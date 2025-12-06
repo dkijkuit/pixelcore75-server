@@ -1,7 +1,6 @@
 name: pixelcore75
 services:
   nanomq:
-    container_name: nanomq
     ports:
       - 1883:1883
       - 8083:8083
@@ -15,7 +14,6 @@ services:
       - "NANOMQ_HTTP_AUTH_TYPE=basic"
 
   mqttx-web:
-    container_name: mqttx-web
     ports:
       - 8090:80
     image: emqx/mqttx-web

@@ -33,67 +33,43 @@ import java.util.stream.IntStream;
 @SpringBootApplication
 @RequiredArgsConstructor
 public class CryptoTickerServerApplication {
-	final Px75UserDetailsService userDetailsService;
-	final Px75PanelService panelService;
-	final Px75PanelConfigService panelConfigService;
-	public static void main(String[] args) {
-		SpringApplication.run(CryptoTickerServerApplication.class, args);
-	}
+    final Px75UserDetailsService userDetailsService;
+    final Px75PanelService panelService;
+    final Px75PanelConfigService panelConfigService;
 
-	@EventListener(ApplicationReadyEvent.class)
-	public void startup() {
-		try{
-            //SoccerMatch soccerMatch = espnSoccerMatchClient.getSoccerMatch("ned.2", "4426");
-            userDetailsService.loadUserByUsername("admin");
-		} catch (UsernameNotFoundException unfe) {
-			//generateRandomPanels(1);
-			Px75User admin = userDetailsService.addUser(new Px75User("admin", "test", "admin@adminspace.com", Set.of(Px75Role.ADMIN, Px75Role.USER)));
-//			Px75User jaap = userDetailsService.addUser(new Px75User("jaap", "test", "jaap@adminspace.com", Set.of(Px75Role.USER)));
-//			Px75User dirk = userDetailsService.addUser(new Px75User("dirk", "test", "dirk@adminspace.com", Set.of(Px75Role.USER)));
-//			Px75User jan = userDetailsService.addUser(new Px75User("jan", "test", "jan@adminspace.com", Set.of(Px75Role.USER)));
-//			Px75User ziko = userDetailsService.addUser(new Px75User("ziko", "test", "ziko@adminspace.com", Set.of(Px75Role.USER)));
-//
-//			panelService.addPx75Panel(new Px75Panel(null, admin.getId(), "PXCORE75-"+randomMACAddress().replace(":", ""), randomMACAddress(), "Crypto ticker panel", Px75PanelType.P_64_X_32));
-//			panelService.addPx75Panel(new Px75Panel(null, admin.getId(), "PXCORE75-"+randomMACAddress().replace(":", ""), randomMACAddress(), "Stock ticker panel", Px75PanelType.P_64_X_32));
-//			panelService.addPx75Panel(new Px75Panel(null, jaap.getId(), "PXCORE75-"+randomMACAddress().replace(":", ""), randomMACAddress(), "Generic text panel", Px75PanelType.P_64_X_32));
-//			panelService.addPx75Panel(new Px75Panel(null, jaap.getId(), "PXCORE75-"+randomMACAddress().replace(":", ""), randomMACAddress(), "Sports score panel", Px75PanelType.P_64_X_32));
-//			panelService.addPx75Panel(new Px75Panel(null, jaap.getId(), "PXCORE75-"+randomMACAddress().replace(":", ""), randomMACAddress(), "Weather panel", Px75PanelType.P_64_X_32));
-//			panelService.addPx75Panel(new Px75Panel(null, dirk.getId(), "PXCORE75-"+randomMACAddress().replace(":", ""), randomMACAddress(), "SMS message panel", Px75PanelType.P_64_X_32));
-//			panelService.addPx75Panel(new Px75Panel(null, dirk.getId(), "PXCORE75-"+randomMACAddress().replace(":", ""), randomMACAddress(), "Stock ticker panel", Px75PanelType.P_64_X_32));
-//			panelService.addPx75Panel(new Px75Panel(null, jan.getId(), "PXCORE75-"+randomMACAddress().replace(":", ""), randomMACAddress(), "Crypto ticker panel", Px75PanelType.P_64_X_32));
-//			panelService.addPx75Panel(new Px75Panel(null, ziko.getId(), "PXCORE75-"+randomMACAddress().replace(":", ""), randomMACAddress(), "Forecast panel", Px75PanelType.P_64_X_32));
-		}
-	}
+    public static void main(String[] args) {
+        SpringApplication.run(CryptoTickerServerApplication.class, args);
+    }
 
-	void generateRandomPanels(int amount) {
-		final Px75User admin = userDetailsService.addUser(new Px75User("admin", "test", "admin@adminspace.com", Set.of(Px75Role.ADMIN, Px75Role.USER)));
+    void generateRandomPanels(int amount) {
+        final Px75User admin = userDetailsService.addUser(new Px75User("admin", "test", "admin@pixelcore75.com", Set.of(Px75Role.ADMIN, Px75Role.USER)));
 
-		Faker faker = new Faker();
-		for (int i = 0; i < amount; i++) {
-			String name = faker.internet().username();
-			String email = faker.internet().emailAddress();
-			String macAddress = faker.internet().macAddress();
-			String panelName = faker.word().noun() + " panel";
-			Px75User user = userDetailsService.addUser(new Px75User(name, "test", email, Set.of(Px75Role.USER)));
-			Px75Panel px75Panel = panelService.addPx75Panel(new Px75Panel(null, user.getId(), "PXCORE75-" + macAddress.replace(":", ""), macAddress, panelName, Px75PanelType.P_64_X_32));
+        Faker faker = new Faker();
+        for (int i = 0; i < amount; i++) {
+            String name = faker.internet().username();
+            String email = faker.internet().emailAddress();
+            String macAddress = faker.internet().macAddress();
+            String panelName = faker.word().noun() + " panel";
+            Px75User user = userDetailsService.addUser(new Px75User(name, "test", email, Set.of(Px75Role.USER)));
+            Px75Panel px75Panel = panelService.addPx75Panel(new Px75Panel(null, user.getId(), "PXCORE75-" + macAddress.replace(":", ""), macAddress, panelName, Px75PanelType.P_64_X_32));
 
-			int panelScreenConfigsCount = ThreadLocalRandom.current().nextInt(0, 5);
-			Px75PanelConfig panelConfig = new Px75PanelConfig();
-			log.info("Adding {} pane configs", panelScreenConfigsCount);
-			List<ImageScreenConfig> imageScreenConfigs = IntStream.range(0, panelScreenConfigsCount).mapToObj(c -> {
-				String image = switch(c){
+            int panelScreenConfigsCount = ThreadLocalRandom.current().nextInt(0, 5);
+            Px75PanelConfig panelConfig = new Px75PanelConfig();
+            log.info("Adding {} pane configs", panelScreenConfigsCount);
+            List<ImageScreenConfig> imageScreenConfigs = IntStream.range(0, panelScreenConfigsCount).mapToObj(c -> {
+                String image = switch (c) {
                     case 1 -> "assets/images/landscape.png";
-					case 2 -> "assets/images/moon.png";
-					case 3 -> "assets/images/seas.png";
-					default -> "assets/images/cat.png";
-				};
+                    case 2 -> "assets/images/moon.png";
+                    case 3 -> "assets/images/seas.png";
+                    default -> "assets/images/cat.png";
+                };
 
-				return new ImageScreenConfig(ScreenType.IMAGE, 5, image, null);
-			}).toList();
-			panelConfig.setPanelId(px75Panel.getPanelId());
-			panelConfig.setScreensConfig(imageScreenConfigs);
+                return new ImageScreenConfig(ScreenType.IMAGE, 5, image, null);
+            }).toList();
+            panelConfig.setPanelId(px75Panel.getPanelId());
+            panelConfig.setScreensConfig(imageScreenConfigs);
 
-			panelConfigService.save(panelConfig);
-		}
-	}
+            panelConfigService.save(panelConfig);
+        }
+    }
 }

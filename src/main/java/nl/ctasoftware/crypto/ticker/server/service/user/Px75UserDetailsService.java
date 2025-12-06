@@ -1,10 +1,13 @@
 package nl.ctasoftware.crypto.ticker.server.service.user;
 
+import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
 import nl.ctasoftware.crypto.ticker.server.model.Px75Role;
 import nl.ctasoftware.crypto.ticker.server.model.Px75User;
 import nl.ctasoftware.crypto.ticker.server.repository.UserRepository;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
+import org.springframework.core.env.Environment;
 import org.springframework.data.domain.Sort;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
@@ -16,18 +19,35 @@ import org.springframework.util.StringUtils;
 
 import java.util.HashSet;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
+@Slf4j
 @Service
 public class Px75UserDetailsService implements UserDetailsService {
-
+    private final Environment env;
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
 
-    public Px75UserDetailsService(UserRepository userRepository, PasswordEncoder passwordEncoder) {
+    public Px75UserDetailsService(final Environment env, final UserRepository userRepository, final PasswordEncoder passwordEncoder) {
+        this.env = env;
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
+    }
+
+    @SuppressWarnings({"SpringCacheableMethodCallsInspection", "SpringTransactionalMethodCallsInspection"})
+    @PostConstruct
+    void init() {
+        final String adminUser = env.getProperty("pixelcore75.admin.user", "admin");
+        try {
+            this.getPx75User(adminUser);
+        } catch (UsernameNotFoundException e) {
+            final String password = UUID.randomUUID().toString();
+            log.info("****************************************************************************************");
+            log.info("Admin user not found, creating user: {} with password: {}", adminUser, password);
+            log.info("****************************************************************************************");
+            this.addUser(new Px75User(adminUser, password, env.getProperty("pixelcore75.admin.email"), Set.of(Px75Role.ADMIN, Px75Role.USER)));
+        }
     }
 
     @Transactional

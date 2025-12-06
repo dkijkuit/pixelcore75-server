@@ -36,6 +36,9 @@ logging:
     root: INFO
 
 pixelcore75:
+  admin:
+    email: admin@localhost
+    name: admin
   crypto:
     client: coingecko
     apikey: ${CRYPTO_API_KEY:}

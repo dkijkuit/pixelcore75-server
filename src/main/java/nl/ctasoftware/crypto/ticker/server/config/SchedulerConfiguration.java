@@ -39,7 +39,6 @@ public class SchedulerConfiguration {
         return ts;
     }
 
-    // Een aparte executor voor de echte job-runner:
     @Bean(destroyMethod = "close")
     public ExecutorService jobWorker() {
         ThreadFactory tf = Thread.ofVirtual()
