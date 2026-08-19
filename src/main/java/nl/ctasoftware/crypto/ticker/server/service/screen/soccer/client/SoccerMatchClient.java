@@ -8,4 +8,5 @@ import java.util.Optional;
 public interface SoccerMatchClient {
     Optional<SoccerMatch> getSoccerMatch(String competition, String teamId);
     List<String> getLeagues();
+    List<TeamSummary> getTeams(String competition);
 }

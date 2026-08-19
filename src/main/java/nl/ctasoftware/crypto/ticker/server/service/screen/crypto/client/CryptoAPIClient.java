@@ -8,4 +8,5 @@ import java.util.List;
 public interface CryptoAPIClient {
     List<CoinPriceHistory> getCoinPriceHistory(String currency, String symbol);
     CoinPricePercentage getCoinPricePercentage(String symbol);
+    List<CoinSummary> getCoins();
 }

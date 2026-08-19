@@ -117,7 +117,9 @@ public class PanelController {
                 ? px75PanelService.getPx75Panel(panelId)
                 : px75PanelService.getPx75PanelForUser(user.getId(), panelId);
 
-        long ttlSeconds = 120; // 2 minutes is typical
+        // Long enough to survive EventSource auto-reconnects after idle/sleep drops (the ticket
+        // stays in the reconnect URL until the page reloads), short enough to bound replay.
+        long ttlSeconds = 3600;
         String token = sseTicketService.issue(user.getId(), panel.getPanelId(), ttlSeconds);
         return Map.of("ticket", token, "expiresIn", ttlSeconds);
     }

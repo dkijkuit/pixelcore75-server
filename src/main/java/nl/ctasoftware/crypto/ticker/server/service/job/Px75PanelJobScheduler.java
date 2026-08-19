@@ -7,6 +7,7 @@ import nl.ctasoftware.crypto.ticker.server.model.panel.config.Px75PanelConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageBroadcasterService;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageService;
+import nl.ctasoftware.crypto.ticker.server.service.panel.AnimationLoadAckService;
 import nl.ctasoftware.crypto.ticker.server.service.panel.Px75PanelConfigService;
 import nl.ctasoftware.crypto.ticker.server.service.panel.Px75PanelService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.ScreenService;
@@ -22,6 +23,8 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -37,9 +40,13 @@ public class Px75PanelJobScheduler implements PanelJobScheduler {
     final ImageService imageService;
     final IMqttClient mqttClient;
     final ImageBroadcasterService imageBroadcasterService;
+    final AnimationLoadAckService animationLoadAckService;
     final JobSchedulerService jobSchedulerService;
     final Duration stepDelay = Duration.ofMillis(250);
     final AtomicInteger index = new AtomicInteger(0);
+
+    /** Shared across PanelScreenJob instances so a re-scheduled job supersedes stale preview streams. */
+    final ConcurrentMap<String, AtomicInteger> previewGenerations = new ConcurrentHashMap<>();
 
     @Override
     public void schedulePanelScreenJob(final long panelId, final long userId) {
@@ -50,7 +57,7 @@ public class Px75PanelJobScheduler implements PanelJobScheduler {
 
         log.info("Scheduling PanelScreenJob for user {} for panel {}", userId, panelId);
 
-        final PanelScreenJob panelScreenJob = new PanelScreenJob(px75PanelForUser, panelConfig, screenServices, imageService, mqttClient, imageBroadcasterService);
+        final PanelScreenJob panelScreenJob = new PanelScreenJob(px75PanelForUser, panelConfig, screenServices, imageService, mqttClient, imageBroadcasterService, animationLoadAckService, previewGenerations);
         jobSchedulerService.schedule(panelScreenJob, Duration.ZERO);
     }
 
@@ -68,7 +75,7 @@ public class Px75PanelJobScheduler implements PanelJobScheduler {
             int i = index.getAndIncrement();
             log.info("--> Starting panel job for panelId: {}", px75Panel.getPanelId());
             final Px75PanelConfig panelConfig = px75PanelConfigService.getPanelConfig(px75Panel.getPanelId());
-            final PanelScreenJob panelScreenJob = new PanelScreenJob(px75Panel, panelConfig, screenServices, imageService, mqttClient, imageBroadcasterService);
+            final PanelScreenJob panelScreenJob = new PanelScreenJob(px75Panel, panelConfig, screenServices, imageService, mqttClient, imageBroadcasterService, animationLoadAckService, previewGenerations);
 
             Duration delay = stepDelay.multipliedBy(i);
             jobSchedulerService.schedule(panelScreenJob, delay);

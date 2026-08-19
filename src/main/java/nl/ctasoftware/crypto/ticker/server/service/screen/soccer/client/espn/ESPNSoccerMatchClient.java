@@ -7,7 +7,7 @@ import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.NextMatchNotFou
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.SoccerMatch;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.SoccerTeam;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.client.SoccerMatchClient;
-import nl.ctasoftware.crypto.ticker.server.utils.RandomUserAgent;
+import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.client.TeamSummary;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.cache.annotation.CacheConfig;
@@ -22,6 +22,7 @@ import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 @Slf4j
@@ -29,6 +30,10 @@ import java.util.Optional;
 @ConditionalOnProperty(name = "pixelcore75.soccer.client", havingValue = "espn")
 @CacheConfig(cacheManager = "soccerCacheManager", cacheNames = "soccerMatch")
 public class ESPNSoccerMatchClient implements SoccerMatchClient {
+    // ESPN's CDN (Akamai) 403s requests with browser-like or Java default user agents; a plain
+    // tool-style UA is allowed. Verified empirically against site.api.espn.com.
+    static final String NON_BROWSER_USER_AGENT = "curl/8.5.0";
+
     final RestClient espnSiteRestClient;
     final RestClient espnCoreApiRestClient;
     final String espnCoreApiBasePath;
@@ -54,11 +59,11 @@ public class ESPNSoccerMatchClient implements SoccerMatchClient {
     }
 
     @Override
-    @Cacheable
+    @Cacheable(cacheNames = "soccerMetadata")
     public List<String> getLeagues() {
         final ResponseEntity<PagedRefs> response = espnCoreApiRestClient.get()
                 .uri(uriBuilder -> uriBuilder.path("/soccer/leagues").queryParam("limit", 500).build())
-                .header("User-Agent", RandomUserAgent.getRandomUserAgent())
+                .header("User-Agent", NON_BROWSER_USER_AGENT)
                 .retrieve()
                 .toEntity(PagedRefs.class);
 
@@ -75,11 +80,38 @@ public class ESPNSoccerMatchClient implements SoccerMatchClient {
                 .toList();
     }
 
+    @Override
+    @Cacheable(cacheNames = "soccerMetadata")
+    public List<TeamSummary> getTeams(final String competition) {
+        final ResponseEntity<TeamsResponse> response = espnSiteRestClient.get()
+                .uri("soccer/{competition}/teams?limit=500", competition)
+                .header("User-Agent", NON_BROWSER_USER_AGENT)
+                .retrieve()
+                .toEntity(TeamsResponse.class);
+
+        final List<TeamSummary> teams = Optional.ofNullable(response.getBody())
+                .map(TeamsResponse::sports)
+                .orElse(List.of())
+                .stream()
+                .flatMap(sport -> Optional.ofNullable(sport.leagues()).orElse(List.of()).stream())
+                .flatMap(league -> Optional.ofNullable(league.teams()).orElse(List.of()).stream())
+                .map(TeamsResponse.TeamEntry::team)
+                .filter(Objects::nonNull)
+                .map(team -> new TeamSummary(team.id(), team.displayName()))
+                .toList();
+
+        if (teams.isEmpty()) {
+            throw new Px75ClientException("failed to fetch ESPN teams for competition " + competition);
+        }
+
+        return teams;
+    }
+
     private SoccerMatch getMatch(final String competition, final String teamId) {
         final String matchId = getNextMatchId(competition, teamId);
         final ResponseEntity<NextMatchResponse.Event> nextMatchResponseEntity = espnSiteRestClient.get()
                 .uri("soccer/{competition}/scoreboard/{matchId}/?ts={}", competition, matchId, System.currentTimeMillis())
-                .header("User-Agent", RandomUserAgent.getRandomUserAgent())
+                .header("User-Agent", NON_BROWSER_USER_AGENT)
                 .retrieve()
                 .toEntity(NextMatchResponse.Event.class);
 
@@ -99,6 +131,7 @@ public class ESPNSoccerMatchClient implements SoccerMatchClient {
     private String getNextMatchId(final String competition, final String teamId) {
         final ResponseEntity<JsonNode> nextMatchEntity = espnSiteRestClient.get()
                 .uri("soccer/{competition}/teams/{teamId}/", competition, teamId)
+                .header("User-Agent", NON_BROWSER_USER_AGENT)
                 .retrieve()
                 .toEntity(JsonNode.class);
 

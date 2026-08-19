@@ -17,6 +17,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.boot.context.event.ApplicationStartedEvent;
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -41,35 +42,37 @@ public class CryptoTickerServerApplication {
         SpringApplication.run(CryptoTickerServerApplication.class, args);
     }
 
-    void generateRandomPanels(int amount) {
-        final Px75User admin = userDetailsService.addUser(new Px75User("admin", "test", "admin@pixelcore75.com", Set.of(Px75Role.ADMIN, Px75Role.USER)));
-
-        Faker faker = new Faker();
-        for (int i = 0; i < amount; i++) {
-            String name = faker.internet().username();
-            String email = faker.internet().emailAddress();
-            String macAddress = faker.internet().macAddress();
-            String panelName = faker.word().noun() + " panel";
-            Px75User user = userDetailsService.addUser(new Px75User(name, "test", email, Set.of(Px75Role.USER)));
-            Px75Panel px75Panel = panelService.addPx75Panel(new Px75Panel(null, user.getId(), "PXCORE75-" + macAddress.replace(":", ""), macAddress, panelName, Px75PanelType.P_64_X_32));
-
-            int panelScreenConfigsCount = ThreadLocalRandom.current().nextInt(0, 5);
-            Px75PanelConfig panelConfig = new Px75PanelConfig();
-            log.info("Adding {} pane configs", panelScreenConfigsCount);
-            List<ImageScreenConfig> imageScreenConfigs = IntStream.range(0, panelScreenConfigsCount).mapToObj(c -> {
-                String image = switch (c) {
-                    case 1 -> "assets/images/landscape.png";
-                    case 2 -> "assets/images/moon.png";
-                    case 3 -> "assets/images/seas.png";
-                    default -> "assets/images/cat.png";
-                };
-
-                return new ImageScreenConfig(ScreenType.IMAGE, 5, image, null);
-            }).toList();
-            panelConfig.setPanelId(px75Panel.getPanelId());
-            panelConfig.setScreensConfig(imageScreenConfigs);
-
-            panelConfigService.save(panelConfig);
-        }
-    }
+//    @EventListener(ApplicationReadyEvent.class)
+//    void generateRandomPanels() {
+//        int amount = 3;
+//        //final Px75User admin = userDetailsService.addUser(new Px75User("admin", "test", "admin@pixelcore75.com", Set.of(Px75Role.ADMIN, Px75Role.USER)));
+//
+//        Faker faker = new Faker();
+//        for (int i = 0; i < amount; i++) {
+//            String name = faker.internet().username();
+//            String email = faker.internet().emailAddress();
+//            String macAddress = faker.internet().macAddress();
+//            String panelName = faker.word().noun() + " panel";
+//            Px75User user = userDetailsService.addUser(new Px75User(name, "test", email, Set.of(Px75Role.USER)));
+//            Px75Panel px75Panel = panelService.addPx75Panel(new Px75Panel(null, user.getId(), "PXCORE75-" + macAddress.replace(":", ""), macAddress, panelName, Px75PanelType.P_64_X_32));
+//
+//            int panelScreenConfigsCount = ThreadLocalRandom.current().nextInt(0, 5);
+//            Px75PanelConfig panelConfig = new Px75PanelConfig();
+//            log.info("Adding {} pane configs", panelScreenConfigsCount);
+//            List<ImageScreenConfig> imageScreenConfigs = IntStream.range(0, panelScreenConfigsCount).mapToObj(c -> {
+//                String image = switch (c) {
+//                    case 1 -> "assets/images/landscape.png";
+//                    case 2 -> "assets/images/moon.png";
+//                    case 3 -> "assets/images/seas.png";
+//                    default -> "assets/images/cat.png";
+//                };
+//
+//                return new ImageScreenConfig(ScreenType.IMAGE, 5, image, null);
+//            }).toList();
+//            panelConfig.setPanelId(px75Panel.getPanelId());
+//            panelConfig.setScreensConfig(imageScreenConfigs);
+//
+//            panelConfigService.save(panelConfig);
+//        }
+//    }
 }

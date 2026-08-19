@@ -55,6 +55,12 @@ public class ClientCacheConfiguration {
                 .expireAfterWrite(30, TimeUnit.MINUTES)
                 .build());
 
+        cacheManager.registerCustomCache("coingeckoCoinList", Caffeine.newBuilder()
+                .initialCapacity(1)
+                .maximumSize(1)
+                .expireAfterWrite(24, TimeUnit.HOURS)
+                .build());
+
         cacheManager.registerCustomCache("weatherForecast", Caffeine.newBuilder()
                 .initialCapacity(1)
                 .maximumSize(100)
@@ -62,6 +68,12 @@ public class ClientCacheConfiguration {
                 .build());
 
         cacheManager.registerCustomCache("images", Caffeine.newBuilder()
+                .initialCapacity(1)
+                .maximumSize(100)
+                .expireAfterWrite(30, TimeUnit.MINUTES)
+                .build());
+
+        cacheManager.registerCustomCache("animations", Caffeine.newBuilder()
                 .initialCapacity(1)
                 .maximumSize(100)
                 .expireAfterWrite(30, TimeUnit.MINUTES)
@@ -128,8 +140,14 @@ public class ClientCacheConfiguration {
 
         var soccerMatchCache = new CaffeineCache("soccerMatch", nativeCache);
 
+        var soccerMetadataCache = new CaffeineCache("soccerMetadata", Caffeine.newBuilder()
+                .initialCapacity(1)
+                .maximumSize(1000)
+                .expireAfterWrite(24, TimeUnit.HOURS)
+                .build());
+
         var manager = new SimpleCacheManager();
-        manager.setCaches(List.of(soccerMatchCache));
+        manager.setCaches(List.of(soccerMatchCache, soccerMetadataCache));
         return manager;
     }
 

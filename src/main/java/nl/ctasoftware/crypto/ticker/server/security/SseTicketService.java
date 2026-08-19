@@ -12,7 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class SseTicketService {
 
-    record Ticket(String token, long userId, long panelId, Instant expiresAt, boolean singleUse) {}
+    record Ticket(String token, long userId, long panelId, Instant expiresAt) {}
 
     private final Map<String, Ticket> store = new ConcurrentHashMap<>();
     private final SecureRandom rng = new SecureRandom();
@@ -23,17 +23,20 @@ public class SseTicketService {
         String token = Base64.getUrlEncoder().withoutPadding().encodeToString(buf);
 
         Instant exp = Instant.now().plusSeconds(ttlSeconds);
-        store.put(token, new Ticket(token, userId, panelId, exp, true));
+        store.put(token, new Ticket(token, userId, panelId, exp));
         return token;
     }
 
-    /** returns the ticket and removes it if single-use and valid */
-    public Ticket consumeIfValid(String token, long expectedPanelId) {
+    /**
+     * Tickets are NOT consumed on use: EventSource auto-reconnects replay the original ticket
+     * URL, and a consumed ticket would turn every transient connection drop into a permanently
+     * stuck preview (401 on each reconnect until page reload). Expiry bounds replay instead.
+     */
+    public Ticket validate(String token, long expectedPanelId) {
         Ticket t = store.get(token);
         if (t == null) return null;
         if (t.expiresAt().isBefore(Instant.now())) { store.remove(token); return null; }
         if (t.panelId() != expectedPanelId) return null;
-        if (t.singleUse) store.remove(token);
         return t;
     }
 

@@ -47,7 +47,7 @@ public class TicketAuthFilter extends OncePerRequestFilter {
                 if (token != null && !token.isBlank()) {
                     Long panelId = tryParsePanelId(req.getRequestURI());
                     if (panelId != null) {
-                        var ticket = tickets.consumeIfValid(token, panelId);
+                        var ticket = tickets.validate(token, panelId);
                         if (ticket != null) {
                             var user = userDetailsService.getPx75UserById(ticket.userId());
                             var auth = new UsernamePasswordAuthenticationToken(

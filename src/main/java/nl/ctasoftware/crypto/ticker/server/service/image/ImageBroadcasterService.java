@@ -108,26 +108,38 @@ public class ImageBroadcasterService {
                     .id(String.valueOf(System.currentTimeMillis()))
                     .data(b64)
                     .reconnectTime(CLIENT_RECONNECT_MS); // hint client retry time
-            emitter.send(event);
-        } catch (IOException e) {
-            // drop dead connections quietly
+            sendGuarded(emitter, event);
+        } catch (Exception e) {
+            // IOException = dead connection, IllegalStateException = emitter completed concurrently;
+            // unregister on anything so neither frames nor the periodic heartbeat task keep dying on it.
             unregisterEmitterOnly(emitter, ownerSet);
         }
     }
 
     private void safeHeartbeat(SseEmitter emitter, Set<SseEmitter> ownerSet) {
         try {
-            emitter.send(SseEmitter.event().comment("heartbeat").reconnectTime(CLIENT_RECONNECT_MS));
-        } catch (IOException e) {
+            sendGuarded(emitter, SseEmitter.event().comment("heartbeat").reconnectTime(CLIENT_RECONNECT_MS));
+        } catch (Exception e) {
             unregisterEmitterOnly(emitter, ownerSet);
         }
     }
 
     private void safeSendComment(SseEmitter emitter, String text, Set<SseEmitter> ownerSet) {
         try {
-            emitter.send(SseEmitter.event().comment(text).reconnectTime(CLIENT_RECONNECT_MS));
-        } catch (IOException e) {
+            sendGuarded(emitter, SseEmitter.event().comment(text).reconnectTime(CLIENT_RECONNECT_MS));
+        } catch (Exception e) {
             unregisterEmitterOnly(emitter, ownerSet);
+        }
+    }
+
+    /**
+     * SseEmitter.send is not thread-safe: concurrent sends (heartbeat from the scheduler thread
+     * vs frames from sseExec) interleave their writes and corrupt the event stream, after which
+     * the client's parser can wait forever on a malformed event. Serialize sends per emitter.
+     */
+    private void sendGuarded(SseEmitter emitter, SseEmitter.SseEventBuilder event) throws IOException {
+        synchronized (emitter) {
+            emitter.send(event);
         }
     }
 

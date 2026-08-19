@@ -2,6 +2,7 @@
 package nl.ctasoftware.crypto.ticker.server.exception;
 
 import org.springframework.http.*;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.*;
 
@@ -29,6 +30,22 @@ public class ApiErrorHandler {
     public ResponseEntity<Map<String, Object>> handleIllegalArg(IllegalArgumentException ex) {
         return ResponseEntity.badRequest().body(Map.of(
                 "status", 400, "error", "Bad Request", "message", ex.getMessage()
+        ));
+    }
+
+    // Upstream (ESPN etc.) fetch failed without an HTTP status of its own
+    @ExceptionHandler(Px75ClientException.class)
+    public ResponseEntity<Map<String, Object>> handleClientException(Px75ClientException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(Map.of(
+                "status", 502, "error", "Bad Gateway", "message", String.valueOf(ex.getMessage())
+        ));
+    }
+
+    // Propagate upstream HTTP errors (e.g. ESPN 404 for an unknown competition) as a clean response
+    @ExceptionHandler(HttpClientErrorException.class)
+    public ResponseEntity<Map<String, Object>> handleUpstreamStatus(HttpClientErrorException ex) {
+        return ResponseEntity.status(ex.getStatusCode()).body(Map.of(
+                "status", ex.getStatusCode().value(), "error", ex.getStatusText(), "message", ex.getStatusText()
         ));
     }
 }

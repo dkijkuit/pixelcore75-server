@@ -5,6 +5,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import nl.ctasoftware.crypto.ticker.server.model.CoinPriceHistory;
 import nl.ctasoftware.crypto.ticker.server.model.CoinPricePercentage;
+import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.client.CoinSummary;
 import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.client.CryptoAPIClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.client.CryptoClientCurrency;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -50,5 +51,25 @@ public class CoinGeckoClient implements CryptoAPIClient {
                 .getBody();
 
         return result.get("prices").valueStream().map(node -> new CoinPriceHistory(node.get(0).asLong(), node.get(1).asDouble())).toList();
+    }
+
+    @Override
+    @Cacheable("coingeckoCoinList")
+    public List<CoinSummary> getCoins() {
+        log.info("Getting top coins");
+
+        final JsonNode result = coinGeckoRestClient.get()
+                .uri("/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1")
+                .retrieve()
+                .toEntity(JsonNode.class)
+                .getBody();
+
+        if (result == null || !result.isArray()) {
+            return List.of();
+        }
+
+        return result.valueStream()
+                .map(node -> new CoinSummary(node.get("id").asText(), node.get("symbol").asText(), node.get("name").asText()))
+                .toList();
     }
 }
