@@ -8,6 +8,7 @@ import nl.ctasoftware.crypto.ticker.server.model.Px75User;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.Px75PanelConfig;
 import nl.ctasoftware.crypto.ticker.server.repository.PanelConfigRepository;
 import nl.ctasoftware.crypto.ticker.server.repository.PanelRepository;
+import nl.ctasoftware.crypto.ticker.server.service.job.JobSchedulerService;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -21,6 +22,7 @@ import java.util.Objects;
 public class Px75PanelService {
     final PanelRepository panelRepository;
     final PanelConfigRepository panelConfigRepository;
+    final JobSchedulerService jobSchedulerService;
 
     public List<Px75Panel> getPx75Panels() {
         return panelRepository.findAll();
@@ -59,6 +61,10 @@ public class Px75PanelService {
         if (!isAdmin && !Objects.equals(panel.getUserId(), requester.getId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not allowed to delete this panel");
         }
+
+        // Stop de screen-job vóór de rijen weggaan: zonder dit blijft de job de (inmiddels
+        // verwijderde) config oneindig publiceren op het serial-topic van het paneel.
+        jobSchedulerService.stop(panel.getSerial(), true);
 
         panelRepository.deleteById(panelId);
         panelConfigRepository.deleteById(panelId);

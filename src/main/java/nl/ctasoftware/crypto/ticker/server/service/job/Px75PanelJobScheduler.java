@@ -53,7 +53,9 @@ public class Px75PanelJobScheduler implements PanelJobScheduler {
         final Px75Panel px75PanelForUser = px75PanelService.getPx75PanelForUser(userId, panelId);
         final Px75PanelConfig panelConfig = px75PanelConfigService.getPanelConfig(panelId);
 
-        jobSchedulerService.stop(px75PanelForUser.getSerial(), false);
+        // Force: de oude run mag een lopende render publiceren nadat de nieuwe job al actief is;
+        // onderbreek hem dus — de nieuwe job herbouwt en herstaged toch alles zelf.
+        jobSchedulerService.stop(px75PanelForUser.getSerial(), true);
 
         log.info("Scheduling PanelScreenJob for user {} for panel {}", userId, panelId);
 

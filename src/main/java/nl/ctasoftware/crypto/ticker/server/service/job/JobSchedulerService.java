@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -35,6 +36,7 @@ public class JobSchedulerService {
         final ReschedulableJob job;
         final AtomicBoolean cancelled = new AtomicBoolean(false);
         final AtomicReference<ScheduledFuture<?>> future = new AtomicReference<>();
+        final AtomicReference<Future<?>> workerFuture = new AtomicReference<>();
         JobState(String id, ReschedulableJob job) { this.id = id; this.job = job; }
     }
 
@@ -43,7 +45,8 @@ public class JobSchedulerService {
     /** Start een job met initiële delay. Geeft jobId terug. */
     public void schedule(ReschedulableJob job, Duration initialDelay) {
         var state = new JobState(job.getId(), job);
-        jobs.put(job.getId(), state);
+        var previous = jobs.put(job.getId(), state);
+        if (previous != null) previous.cancelled.set(true); // vervangende job met zelfde id moet ook echt stoppen
         scheduleOnce(state, initialDelay);
     }
 
@@ -53,14 +56,23 @@ public class JobSchedulerService {
         this.worker.shutdownNow();
     }
 
-    /** Zacht stoppen: voorkomt volgende runs (lopende run mag afmaken). */
+    /**
+     * Zacht stoppen: voorkomt volgende runs (lopende run mag afmaken).
+     * Hard stoppen (force): onderbreekt ook de lopende run via een interrupt — gebruik dit
+     * wanneer de job vervangen wordt door een nieuwe met hetzelfde id, anders publiceert de
+     * oude run nog één keer verouderde content nadat de nieuwe al actief is.
+     */
     public boolean stop(String jobId, boolean force) {
         var state = jobs.get(jobId);
         if (state == null) return false;
         state.cancelled.set(true);
         var f = state.future.getAndSet(null);
         if (f != null) f.cancel(force); // hard-stop: zet op true en zorg dat je job interrupt-vriendelijk is
-        jobs.remove(jobId);
+        if (force) {
+            var w = state.workerFuture.getAndSet(null);
+            if (w != null) w.cancel(true); // onderbreek de lopende run op de worker-thread
+        }
+        jobs.remove(jobId, state); // alleen verwijderen als deze state er nog in staat: voorkomt het wegvegen van een vervangende job met hetzelfde id
         return true;
     }
 
@@ -87,7 +99,7 @@ public class JobSchedulerService {
         if (state.cancelled.get()) return;
 
         //log.info("Scheduling v-thread for job {}", state.job.getId());
-        worker.submit(() -> {
+        var running = worker.submit(() -> {
             try (var _1 = MDC.putCloseable("jobId", state.id);
                  var _2 = MDC.putCloseable("job", state.job.name())) {
 
@@ -99,12 +111,12 @@ public class JobSchedulerService {
                         int jitterMs = ThreadLocalRandom.current().nextInt(0, 250);
                         scheduleOnce(state, base.plusMillis(jitterMs));
                     } else {
-                        jobs.remove(state.id);
+                        jobs.remove(state.id, state); // identity-check: deze key kan inmiddels aan een vervangende job toebehoren
                     }
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     log.warn("Job interrupted; stopping.");
-                    jobs.remove(state.id);
+                    jobs.remove(state.id, state);
                 } catch (Throwable t) {
                     log.error("Job run failed.", t);           // <— zichtbaar in je logs
                     if (!state.cancelled.get()) {
@@ -113,5 +125,7 @@ public class JobSchedulerService {
                 }
             }
         });
+        state.workerFuture.set(running);
+        if (state.cancelled.get()) running.cancel(true); // stop() die net vóór deze set plaatsvond mag de run niet missen
     }
 }

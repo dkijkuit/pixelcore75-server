@@ -133,6 +133,12 @@ public class PanelScreenJob implements ReschedulableJob {
             log.warn("Not re-scheduling screen jobs for panel, because it's ending: {}", panelConfig.getPanelId());
         }
 
+        if (Thread.currentThread().isInterrupted()) {
+            // Vervangen/gestopt door een config-save of paneel-delete: niet meer publiceren.
+            log.debug("----> Job for panel {} interrupted before render, skipping", panelConfig.getPanelId());
+            return Optional.empty();
+        }
+
         final int previewGeneration = bumpPreviewGeneration();
         final int screenIdx = getScreenIndex();
         final ScreenConfig screenConfig = screensConfig.get(screenIdx);
@@ -150,6 +156,10 @@ public class PanelScreenJob implements ReschedulableJob {
         // from the slot so the boundary stays on schedule; if staging overruns the slot the
         // previous screen simply holds until it completes (floor keeps a minimum display).
         // stageNextAnimation never throws: failures log and fall back to an inline upload.
+        if (Thread.currentThread().isInterrupted()) {
+            log.debug("----> Job for panel {} interrupted before staging, skipping", panelConfig.getPanelId());
+            return Optional.empty();
+        }
         final long stagedMillis = stageNextAnimation(screenIdx, screensConfig);
         durationMillis = Math.max(MIN_ANIMATION_SLOT_MILLIS,
                 Duration.ofSeconds(screenConfig.durationSeconds()).toMillis() - stagedMillis);
