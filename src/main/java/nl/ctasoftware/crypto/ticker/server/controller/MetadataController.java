@@ -7,6 +7,7 @@ import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.client.CoinSumm
 import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.client.CryptoAPIClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.client.CryptoClientCurrency;
 import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.client.CurrencySummary;
+import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.client.LeagueSummary;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.client.SoccerMatchClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.client.TeamSummary;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -27,8 +28,10 @@ public class MetadataController {
     final CryptoAPIClient cryptoAPIClient;
 
     @GetMapping("soccer/leagues")
-    public List<String> getMetadata() {
-        return soccerMatchClient.getLeagues().stream().sorted().toList();
+    public List<LeagueSummary> getLeagues() {
+        return soccerMatchClient.getLeagues().stream()
+                .sorted(Comparator.comparing(LeagueSummary::name))
+                .toList();
     }
 
     @GetMapping("soccer/teams")

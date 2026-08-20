@@ -6,6 +6,7 @@ import nl.ctasoftware.crypto.ticker.server.exception.Px75ClientException;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.NextMatchNotFoundException;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.SoccerMatch;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.SoccerTeam;
+import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.client.LeagueSummary;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.client.SoccerMatchClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.client.TeamSummary;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 
+import java.net.URI;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
@@ -59,8 +61,8 @@ public class ESPNSoccerMatchClient implements SoccerMatchClient {
     }
 
     @Override
-    @Cacheable(cacheNames = "soccerMetadata")
-    public List<String> getLeagues() {
+    @Cacheable(cacheNames = "soccerMetadata", sync = true)
+    public List<LeagueSummary> getLeagues() {
         final ResponseEntity<PagedRefs> response = espnCoreApiRestClient.get()
                 .uri(uriBuilder -> uriBuilder.path("/soccer/leagues").queryParam("limit", 500).build())
                 .header("User-Agent", NON_BROWSER_USER_AGENT)
@@ -71,13 +73,37 @@ public class ESPNSoccerMatchClient implements SoccerMatchClient {
             throw new Px75ClientException("failed to fetch ESPN soccer leagues");
         }
 
-        return response.getBody().items().stream()
-                .map(item -> {
-                    String league = item.ref().toString();
-                    league = league.substring(league.indexOf("leagues/") + 8);
-                    return league.substring(0, league.indexOf("?"));
-                })
+        // The leagues listing only carries refs; the name needs one request per league.
+        // parallelStream bounds this to ~1 request per core, the whole list is cached 24h
+        // (soccerMetadata), and a failed ref degrades to a slug-only entry.
+        return response.getBody().items().parallelStream()
+                .map(this::toLeagueSummary)
                 .toList();
+    }
+
+    private LeagueSummary toLeagueSummary(final Ref item) {
+        final String ref = item.ref().toString();
+        String league = ref.substring(ref.indexOf("leagues/") + 8);
+        final String slug = league.substring(0, league.indexOf("?"));
+        return new LeagueSummary(slug, leagueName(item.ref()).orElse(slug));
+    }
+
+    private Optional<String> leagueName(final URI ref) {
+        try {
+            final JsonNode body = espnCoreApiRestClient.get()
+                    .uri(ref)
+                    .header("User-Agent", NON_BROWSER_USER_AGENT)
+                    .retrieve()
+                    .toEntity(JsonNode.class)
+                    .getBody();
+            if (body == null || body.path("name").isMissingNode()) {
+                return Optional.empty();
+            }
+            return Optional.ofNullable(body.get("name").textValue());
+        } catch (final RuntimeException e) {
+            log.debug("failed to fetch ESPN league name for {}", ref, e);
+            return Optional.empty();
+        }
     }
 
     @Override
