@@ -15,9 +15,10 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
         @JsonSubTypes.Type(value = SoccerMatchScreenConfig.class, name = "SOCCER_MATCH"),
         @JsonSubTypes.Type(value = ClockScreenConfig.class, name = "CLOCK"),
         @JsonSubTypes.Type(value = DateScreenConfig.class, name = "DATE"),
-        @JsonSubTypes.Type(value = Formula1ScreenConfig.class, name = "FORMULA1")
+        @JsonSubTypes.Type(value = Formula1ScreenConfig.class, name = "FORMULA1"),
+        @JsonSubTypes.Type(value = AircraftScreenConfig.class, name = "NEARBY_AIRCRAFT")
 })
-public sealed interface ScreenConfig permits AnimationScreenConfig, ClockScreenConfig, CryptoScreenConfig, DateScreenConfig, Formula1ScreenConfig, ImageScreenConfig, SoccerMatchScreenConfig, WeatherScreenConfig {
+public sealed interface ScreenConfig permits ClockScreenConfig, CryptoScreenConfig, DateScreenConfig, Formula1ScreenConfig, FrameScreenConfig, ImageScreenConfig, SoccerMatchScreenConfig, WeatherScreenConfig {
     ScreenType screenType();
 
     int durationSeconds();

@@ -8,5 +8,6 @@ public enum ScreenType {
     SOCCER_MATCH,
     CLOCK,
     DATE,
-    FORMULA1
+    FORMULA1,
+    NEARBY_AIRCRAFT
 }

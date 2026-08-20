@@ -8,7 +8,9 @@ import nl.ctasoftware.crypto.ticker.server.model.panel.config.*;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageBroadcasterService;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageService;
 import nl.ctasoftware.crypto.ticker.server.service.panel.AnimationLoadAckService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.ScreenService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.AircraftScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.animation.AnimationScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.clock.ClockScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.CryptoScreenService;
@@ -176,8 +178,8 @@ public class PanelScreenJob implements ReschedulableJob {
 
         log.debug("------> Rendering screen {} for panel {}", screenConfig.screenType(), panelConfig.getPanelId());
 
-        if (screenConfig instanceof AnimationScreenConfig animationScreenConfig) {
-            renderAnimationScreen((AnimationScreenService) screenService, animationScreenConfig, previewGeneration, screenIdx);
+        if (screenConfig instanceof FrameScreenConfig frameScreenConfig && frameScreenConfig.producesFrames()) {
+            renderFrameScreen((FrameScreenService) screenService, frameScreenConfig, previewGeneration, screenIdx);
             return;
         }
 
@@ -189,18 +191,20 @@ public class PanelScreenJob implements ReschedulableJob {
             case ClockScreenConfig i -> ((ClockScreenService) screenService).renderScreen(i);
             case DateScreenConfig i -> ((DateScreenService) screenService).renderScreen(i);
             case Formula1ScreenConfig i -> ((Formula1ScreenService) screenService).renderScreen(i);
+            case AircraftScreenConfig a -> ((AircraftScreenService) screenService).renderScreen(a);
             case AnimationScreenConfig a -> ((AnimationScreenService) screenService).renderScreen(a);
         };
 
         screenImage.ifPresent(this::sendImageToPanel);
     }
 
-    private void renderAnimationScreen(final AnimationScreenService animationScreenService,
-                                       final AnimationScreenConfig screenConfig,
-                                       final int previewGeneration,
-                                       final int screenIdx) {
-        final List<BufferedImage> frames = animationScreenService.renderFrames(screenConfig);
-        final long frameDelayMs = Math.max(AnimationScreenService.MIN_FRAME_DELAY_MS, screenConfig.frameDelayMs());
+    private <T extends FrameScreenConfig> void renderFrameScreen(final FrameScreenService<T> screenService,
+                                                                 final T screenConfig,
+                                                                 final int previewGeneration,
+                                                                 final int screenIdx) {
+        final FrameScreenService.FrameStream stream = screenService.renderFrameStream(screenConfig);
+        final List<BufferedImage> frames = stream.frames();
+        final long frameDelayMs = stream.frameDelayMs();
         final long slotNanos = Duration.ofSeconds(screenConfig.durationSeconds()).toNanos();
         final String serial = px75Panel.getSerial();
         final int slot = animationSlotFor(screenIdx, panelConfig.getScreensConfig());
@@ -264,11 +268,13 @@ public class PanelScreenJob implements ReschedulableJob {
     }
 
     /**
-     * Uploads the next rotation screen's animation to the panel right away, while the current
+     * Uploads the next rotation screen's frame stream to the panel right away, while the current
      * screen is displaying (stage-only: the panel stores it in its slot file and waits for
-     * {@code /anim/play} at the boundary). Runs at full speed — the panel applies its own
-     * flow control (MQTT backpressure) while it drains frames to flash without disturbing
-     * what's on display. Skipped when the target slot is the one currently playing (a
+     * {@code /anim/play} at the boundary). Skipped for screens that opt out of staging via
+     * {@link FrameScreenConfig#stageAhead()} — those render fresh at the boundary instead, so
+     * their frames reflect the latest data at display time. Runs at full speed — the panel
+     * applies its own flow control (MQTT backpressure) while it drains frames to flash without
+     * disturbing what's on display. Skipped when the target slot is the one currently playing (a
      * single-animation rotation, or slot wraparound past 32 animations): replacing it would
      * freeze the playing animation, so that boundary uploads inline instead. Returns the
      * wall-clock millis spent; the caller subtracts them from the current slot.
@@ -278,13 +284,14 @@ public class PanelScreenJob implements ReschedulableJob {
 
         final int n = configs.size();
         final int nextIdx = (currentIdx + 1) % n;
-        if (!(configs.get(nextIdx) instanceof AnimationScreenConfig animConfig)) {
+        if (!(configs.get(nextIdx) instanceof FrameScreenConfig animConfig)
+                || !animConfig.producesFrames()
+                || !animConfig.stageAhead()) {
             return 0;
         }
 
         final int nextSlot = animationSlotFor(nextIdx, configs);
-        if (configs.get(currentIdx) instanceof AnimationScreenConfig
-                && animationSlotFor(currentIdx, configs) == nextSlot) {
+        if (producesFrames(configs.get(currentIdx)) && animationSlotFor(currentIdx, configs) == nextSlot) {
             return 0; // staging would clobber the slot the current animation is playing from
         }
 
@@ -292,10 +299,11 @@ public class PanelScreenJob implements ReschedulableJob {
         final String serial = px75Panel.getSerial();
 
         try {
-            final AnimationScreenService animationScreenService =
-                    (AnimationScreenService) screenServices.get(animConfig.screenType());
-            final List<BufferedImage> frames = animationScreenService.renderFrames(animConfig);
-            final long frameDelayMs = Math.max(AnimationScreenService.MIN_FRAME_DELAY_MS, animConfig.frameDelayMs());
+            final FrameScreenService frameScreenService =
+                    (FrameScreenService) screenServices.get(animConfig.screenType());
+            final FrameScreenService.FrameStream stagedStream = frameScreenService.renderFrameStream(animConfig);
+            final List<BufferedImage> frames = stagedStream.frames();
+            final long frameDelayMs = stagedStream.frameDelayMs();
             final List<byte[]> payloads = framePayloads(frames);
 
             final long uploadId = animationLoadAckService.arm(serial);
@@ -326,15 +334,19 @@ public class PanelScreenJob implements ReschedulableJob {
         return stagedNextUploadId;
     }
 
-    /** Slot index for an animation screen: its ordinal among the rotation's animation screens, capped. */
+    /** Slot index for a frame-streaming screen: its ordinal among the rotation's frame screens, capped. */
     private static int animationSlotFor(final int screenIdx, final List<? extends ScreenConfig> configs) {
         int ordinal = 0;
         for (int i = 0; i <= screenIdx; i++) {
-            if (configs.get(i) instanceof AnimationScreenConfig) {
+            if (producesFrames(configs.get(i))) {
                 ordinal++;
             }
         }
         return (ordinal - 1) % MAX_ANIM_SLOTS;
+    }
+
+    private static boolean producesFrames(final ScreenConfig config) {
+        return config instanceof FrameScreenConfig frameConfig && frameConfig.producesFrames();
     }
 
     private List<byte[]> framePayloads(final List<BufferedImage> frames) {

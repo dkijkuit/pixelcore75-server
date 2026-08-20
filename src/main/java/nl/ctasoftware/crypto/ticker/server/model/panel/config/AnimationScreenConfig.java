@@ -7,4 +7,15 @@ public record AnimationScreenConfig(
         int durationSeconds,
         int frameDelayMs,
         List<String> frames
-) implements ScreenConfig {}
+) implements FrameScreenConfig {
+
+    @Override
+    public boolean producesFrames() {
+        return true;
+    }
+
+    @Override
+    public boolean stageAhead() {
+        return true;
+    }
+}

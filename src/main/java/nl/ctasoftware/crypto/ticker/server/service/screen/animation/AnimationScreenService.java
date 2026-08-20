@@ -2,8 +2,10 @@ package nl.ctasoftware.crypto.ticker.server.service.screen.animation;
 
 import lombok.extern.slf4j.Slf4j;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.AnimationScreenConfig;
+import nl.ctasoftware.crypto.ticker.server.model.panel.config.FrameScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenType;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.ScreenService;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
@@ -18,10 +20,10 @@ import java.util.Optional;
 
 @Slf4j
 @Service
-public class AnimationScreenService implements ScreenService<AnimationScreenConfig> {
+public class AnimationScreenService implements FrameScreenService<AnimationScreenConfig> {
     public static final int MIN_FRAMES = 2;
     public static final int MAX_FRAMES = 200;
-    public static final int MIN_FRAME_DELAY_MS = 10;
+    public static final int MIN_FRAME_DELAY_MS = FrameScreenConfig.MIN_FRAME_DELAY_MS;
 
     @Override
     public ScreenType getScreenType() {

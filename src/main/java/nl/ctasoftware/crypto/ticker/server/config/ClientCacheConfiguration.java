@@ -85,6 +85,27 @@ public class ClientCacheConfiguration {
                 .expireAfterWrite(60, TimeUnit.MINUTES)
                 .build());
 
+        // Live aircraft positions: effectively no cache (adsb.lol refreshes ~1s), just
+        // enough to dedupe concurrent panels fetching the same area within a render cycle.
+        cacheManager.registerCustomCache("adsbLolNearby", Caffeine.newBuilder()
+                .initialCapacity(1)
+                .maximumSize(50)
+                .expireAfterWrite(1, TimeUnit.SECONDS)
+                .build());
+
+        // adsbdb registry data is static; routes change only per callsign flight.
+        cacheManager.registerCustomCache("adsbdbAircraft", Caffeine.newBuilder()
+                .initialCapacity(1)
+                .maximumSize(1000)
+                .expireAfterWrite(24, TimeUnit.HOURS)
+                .build());
+
+        cacheManager.registerCustomCache("adsbdbRoute", Caffeine.newBuilder()
+                .initialCapacity(1)
+                .maximumSize(1000)
+                .expireAfterWrite(1, TimeUnit.HOURS)
+                .build());
+
         return cacheManager;
     }
 

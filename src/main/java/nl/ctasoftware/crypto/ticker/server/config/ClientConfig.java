@@ -7,7 +7,11 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
+
+import java.net.http.HttpClient;
+import java.time.Duration;
 
 @Slf4j
 @Configuration
@@ -71,5 +75,40 @@ public class ClientConfig {
                 .baseUrl("https://www.thesportsdb.com/api/v2/json")
                 .defaultHeader("X-API-KEY", apiKey) // V2 header auth
                 .build();
+    }
+
+    @Bean
+    RestClient adsbLolRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+        return RestClient.builder()
+                .requestFactory(timedJdkRequestFactory())
+                .requestInterceptor(noCacheRequestInterceptor)
+                .defaultHeader(HttpHeaders.USER_AGENT, "pixelcore75")
+                .baseUrl("https://api.adsb.lol/v2/")
+                .build();
+    }
+
+    @Bean
+    RestClient adsbdbRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+        return RestClient.builder()
+                .requestFactory(timedJdkRequestFactory())
+                .requestInterceptor(noCacheRequestInterceptor)
+                .defaultHeader(HttpHeaders.USER_AGENT, "pixelcore75")
+                .baseUrl("https://api.adsbdb.com/v0/")
+                .build();
+    }
+
+    /**
+     * adsb.lol resolves to several ingress nodes of which some are intermittently
+     * unreachable (TLS reset / hang): keep connect/read timeouts tight so a render
+     * slot never blocks on a dead node; clients retry and degrade gracefully.
+     */
+    private static JdkClientHttpRequestFactory timedJdkRequestFactory() {
+        final HttpClient httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(3))
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .build();
+        final JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
+        requestFactory.setReadTimeout(Duration.ofSeconds(5));
+        return requestFactory;
     }
 }
