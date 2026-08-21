@@ -22,7 +22,13 @@ import java.util.Optional;
 @Service
 public class AnimationScreenService implements FrameScreenService<AnimationScreenConfig> {
     public static final int MIN_FRAMES = 2;
-    public static final int MAX_FRAMES = 200;
+
+    /**
+     * Screen-type cap for GIF/ANIMATION screens (server validation; the frontend
+     * auto-trims GIFs to this limit with a user hint). The MQTT wire protocol keeps
+     * its 2–200 frame range for other frame-producing screens (e.g. radar).
+     */
+    public static final int MAX_FRAMES = 60;
     public static final int MIN_FRAME_DELAY_MS = FrameScreenConfig.MIN_FRAME_DELAY_MS;
 
     @Override

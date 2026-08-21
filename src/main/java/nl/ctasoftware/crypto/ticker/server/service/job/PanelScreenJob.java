@@ -33,6 +33,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -47,10 +48,12 @@ public class PanelScreenJob implements ReschedulableJob {
     static final byte ANIM_FLAG_STAGE_ONLY = 0x01;
 
     /**
-     * Animation slots on the panel (must match firmware ANIM_MAX_SLOTS). The panel stores each
-     * animation temporarily in a slot file; every animation is uploaded fresh during the screen
-     * before it, so slots are just scratch space, not a persistent cache (capacity is shared
-     * ~4.9MB LittleFS; the panel evicts idle slot files for space when needed).
+     * Animation slots on the panel (must match firmware ANIM_MAX_SLOTS). Slot files double as a
+     * persistent content cache keyed by uploadId (a content hash from {@link UploadIdHasher}):
+     * the panel persists the id per slot, so when the next cycle's content hashes to the last
+     * acked id the upload is skipped entirely and the boundary sends only {@code /anim/play}
+     * (capacity is shared ~4.9MB LittleFS; the panel evicts idle slot files for space when
+     * needed, invalidating their persisted ids).
      */
     static final int MAX_ANIM_SLOTS = 32;
 
@@ -67,7 +70,9 @@ public class PanelScreenJob implements ReschedulableJob {
     /**
      * Upload staged for the next rotation screen (if it is an animation): its boundary only
      * sends {@code /anim/play}. Only ever one entry ahead — a job replacement (config save)
-     * drops it and that boundary falls back to an inline upload.
+     * drops it and that boundary falls back to an inline upload. Also set for a "hash-cached"
+     * staging (upload skipped because the panel slot already holds the exact content), in
+     * which case the play-time ack confirms it or the boundary re-uploads inline.
      */
     private long stagedNextUploadId;
     private int stagedNextIdx = -1;
@@ -217,8 +222,9 @@ public class PanelScreenJob implements ReschedulableJob {
 
             final Long staged = consumeStaged(screenIdx);
             if (staged != null) {
-                // Uploaded to the panel during the previous screen: committing is just a
-                // rename + play, no flash writes while anything is displaying.
+                // Uploaded to the panel during the previous screen (or still sitting in its
+                // slot from an earlier cycle — hash-cached): committing is just a play (a
+                // rename when freshly uploaded), no flash writes while anything displays.
                 animationLoadAckService.arm(serial, staged);
                 mqttClient.publish(serial + ANIM_PLAY_TOPIC, animPlayPayload(staged, slot), 1, false);
                 playbackStarted = animationLoadAckService.awaitLoaded(serial, staged, ANIM_PLAY_ACK_TIMEOUT);
@@ -232,12 +238,30 @@ public class PanelScreenJob implements ReschedulableJob {
 
             if (!playbackStarted) {
                 // Nothing staged (server restart, failed staging, first cycle of a rotation
-                // starting on an animation): upload now; playback starts on the last frame.
-                final long uploadId = animationLoadAckService.arm(serial);
-                final boolean uploadCompleted = sendAnimationToPanel(frameDelayMs, payloads, uploadId, false, slot);
-                playbackStarted = uploadCompleted
-                        && animationLoadAckService.awaitLoaded(serial, uploadId, uploadAckTimeout(frames.size()));
-                mode = "inline upload";
+                // starting on an animation): if the panel's slot still holds this exact content
+                // (its last acked id matches the content hash), commit is just a 9-byte play —
+                // the panel stays silent when its persisted id or slot file doesn't match, and
+                // the 2 s play-ack timeout below falls back to a full inline upload.
+                final long uploadId = UploadIdHasher.contentHash(
+                        payloads.size(), (int) frameDelayMs, 0, payloads);
+                final OptionalLong acked = animationLoadAckService.ackedUploadId(serial, slot);
+                if (acked.isPresent() && acked.getAsLong() == uploadId) {
+                    animationLoadAckService.arm(serial, uploadId);
+                    mqttClient.publish(serial + ANIM_PLAY_TOPIC, animPlayPayload(uploadId, slot), 1, false);
+                    playbackStarted = animationLoadAckService.awaitLoaded(serial, uploadId, ANIM_PLAY_ACK_TIMEOUT);
+                    mode = "hash-cached";
+                }
+                if (!playbackStarted) {
+                    if (mode != null) {
+                        log.warn("------> Play ack timeout for panel {} slot {}; re-uploading inline", serial, slot);
+                    }
+                    // Upload now; playback starts on the last frame.
+                    animationLoadAckService.arm(serial, uploadId);
+                    final boolean uploadCompleted = sendAnimationToPanel(frameDelayMs, payloads, uploadId, false, slot);
+                    playbackStarted = uploadCompleted
+                            && animationLoadAckService.awaitLoaded(serial, uploadId, uploadAckTimeout(frames.size()));
+                    mode = "inline upload";
+                }
             }
 
             if (playbackStarted) {
@@ -306,7 +330,22 @@ public class PanelScreenJob implements ReschedulableJob {
             final long frameDelayMs = stagedStream.frameDelayMs();
             final List<byte[]> payloads = framePayloads(frames);
 
-            final long uploadId = animationLoadAckService.arm(serial);
+            final long uploadId = UploadIdHasher.contentHash(
+                    payloads.size(), (int) frameDelayMs, ANIM_FLAG_STAGE_ONLY, payloads);
+            final OptionalLong acked = animationLoadAckService.ackedUploadId(serial, nextSlot);
+            if (acked.isPresent() && acked.getAsLong() == uploadId) {
+                // The panel's slot still holds this exact content (it acked this uploadId
+                // before): skip the upload entirely — the boundary commits it with a 9-byte
+                // /anim/play like any staged animation, and re-uploads inline if the panel
+                // has since lost the slot.
+                stagedNextIdx = nextIdx;
+                stagedNextUploadId = uploadId;
+                log.debug("------> Animation slot {} (screen {}) on panel {} unchanged (uploadId {}); skipping upload",
+                        nextSlot, nextIdx, serial, uploadId);
+                return (System.nanoTime() - stageStartNanos) / 1_000_000;
+            }
+
+            animationLoadAckService.arm(serial, uploadId);
             final boolean uploadCompleted = sendAnimationToPanel(frameDelayMs, payloads, uploadId, true, nextSlot);
             final boolean staged = uploadCompleted
                     && animationLoadAckService.awaitLoaded(serial, uploadId, uploadAckTimeout(frames.size()));
@@ -349,10 +388,11 @@ public class PanelScreenJob implements ReschedulableJob {
         return config instanceof FrameScreenConfig frameConfig && frameConfig.producesFrames();
     }
 
+    /** Raw RGB565 payload bytes per frame — the content hashed by {@link UploadIdHasher}. */
     private List<byte[]> framePayloads(final List<BufferedImage> frames) {
         final List<byte[]> payloads = new java.util.ArrayList<>(frames.size());
-        for (int i = 0; i < frames.size(); i++) {
-            payloads.add(animFramePayload(i, frames.get(i)));
+        for (final BufferedImage frame : frames) {
+            payloads.add(imageService.bufferedImageToBytes(frame, 0, 0));
         }
         return payloads;
     }
@@ -414,8 +454,8 @@ public class PanelScreenJob implements ReschedulableJob {
 
         // Full speed: the panel buffers frames in RAM and drains them to flash at its own
         // pace (MQTT flow control throttles this loop automatically), so no pacing needed.
-        for (final byte[] payload : payloads) {
-            mqttClient.publish(serial + ANIM_FRAME_TOPIC, payload, 1, false);
+        for (int i = 0; i < payloads.size(); i++) {
+            mqttClient.publish(serial + ANIM_FRAME_TOPIC, animFramePayload(i, payloads.get(i)), 1, false);
         }
 
         return true;
@@ -443,8 +483,7 @@ public class PanelScreenJob implements ReschedulableJob {
         };
     }
 
-    private byte[] animFramePayload(final int frameIdx, final BufferedImage frame) {
-        final byte[] rgb565 = imageService.bufferedImageToBytes(frame, 0, 0);
+    private static byte[] animFramePayload(final int frameIdx, final byte[] rgb565) {
         final byte[] payload = new byte[6 + rgb565.length];
         payload[0] = 'A';
         payload[1] = 'N';

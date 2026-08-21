@@ -3,10 +3,16 @@ package nl.ctasoftware.crypto.ticker.server.config;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
+import com.github.benmanes.caffeine.cache.LoadingCache;
+import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbLolAircraftClient;
+import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbLolAircraftClient.AdsbLolRequest;
+import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.NearbyAircraft;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.SoccerMatch;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.caffeine.CaffeineCache;
 import org.springframework.cache.caffeine.CaffeineCacheManager;
+import org.springframework.cache.support.NullValue;
 import org.springframework.cache.support.SimpleCacheManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -16,12 +22,16 @@ import org.springframework.http.HttpRequest;
 import org.springframework.http.client.ClientHttpRequestExecution;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.ClientHttpResponse;
+import org.springframework.web.client.RestClient;
 
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 @Configuration(proxyBeanMethods = false)
@@ -85,28 +95,88 @@ public class ClientCacheConfiguration {
                 .expireAfterWrite(60, TimeUnit.MINUTES)
                 .build());
 
-        // Live aircraft positions: effectively no cache (adsb.lol refreshes ~1s), just
-        // enough to dedupe concurrent panels fetching the same area within a render cycle.
-        cacheManager.registerCustomCache("adsbLolNearby", Caffeine.newBuilder()
-                .initialCapacity(1)
-                .maximumSize(50)
-                .expireAfterWrite(1, TimeUnit.SECONDS)
-                .build());
-
-        // adsbdb registry data is static; routes change only per callsign flight.
+        // adsbdb registry data is static; routes change only per callsign flight. Unknown
+        // hexes/callsigns (empty results, stored by Spring as its NullValue sentinel)
+        // are negatively cached for 15 minutes — see AdsbdbExpiry below.
         cacheManager.registerCustomCache("adsbdbAircraft", Caffeine.newBuilder()
                 .initialCapacity(1)
                 .maximumSize(1000)
-                .expireAfterWrite(24, TimeUnit.HOURS)
+                .expireAfter(new AdsbdbExpiry(TimeUnit.HOURS.toNanos(24)))
                 .build());
 
         cacheManager.registerCustomCache("adsbdbRoute", Caffeine.newBuilder()
                 .initialCapacity(1)
                 .maximumSize(1000)
-                .expireAfterWrite(1, TimeUnit.HOURS)
+                .expireAfter(new AdsbdbExpiry(TimeUnit.HOURS.toNanos(1)))
                 .build());
 
         return cacheManager;
+    }
+
+    /**
+     * Stale-while-revalidate for live aircraft positions (used directly by
+     * {@link AdsbLolAircraftClient}, no Spring cache proxy): the first get() blocks for
+     * the fetch-retry envelope; afterwards reads return the cached list instantly while
+     * {@code refreshAfterWrite} re-fetches on the executor below — never the rendering
+     * thread. An entry disappears 60 s after its last write if untouched.
+     */
+    @Bean(destroyMethod = "close")
+    ExecutorService adsbLolRefreshExecutor() {
+        return Executors.newThreadPerTaskExecutor(
+                Thread.ofVirtual().name("adsblol-refresh-", 0).factory());
+    }
+
+    @Bean
+    LoadingCache<AdsbLolRequest, List<NearbyAircraft>> adsbLolNearbyCache(
+            @Qualifier("adsbLolRestClient") final RestClient adsbLolRestClient,
+            @Qualifier("adsbLolRefreshExecutor") final ExecutorService adsbLolRefreshExecutor) {
+        return Caffeine.newBuilder()
+                .initialCapacity(1)
+                .maximumSize(50)
+                .expireAfterWrite(60, TimeUnit.SECONDS)
+                .refreshAfterWrite(10, TimeUnit.SECONDS)
+                .executor(adsbLolRefreshExecutor)
+                .build(new AdsbLolAircraftClient.AdsbLolCacheLoader(adsbLolRestClient));
+    }
+
+    /**
+     * Variable TTL for the adsbdb caches: real hits are near-static (24 h aircraft /
+     * 1 h route), while misses — Spring stores {@link Optional#empty()} results as its
+     * {@link NullValue} sentinel for Optional-returning {@code @Cacheable} methods —
+     * expire after 15 minutes so unknown lookups are re-checked without hammering adsbdb.
+     */
+    private static final class AdsbdbExpiry implements Expiry<Object, Object> {
+
+        static final long NEGATIVE_TTL_NANOS = TimeUnit.MINUTES.toNanos(15);
+
+        private final long positiveTtlNanos;
+
+        AdsbdbExpiry(final long positiveTtlNanos) {
+            this.positiveTtlNanos = positiveTtlNanos;
+        }
+
+        @Override
+        public long expireAfterCreate(final Object key, final Object value, final long currentTimeNanos) {
+            return ttl(value);
+        }
+
+        @Override
+        public long expireAfterUpdate(final Object key, final Object value,
+                                      final long currentTimeNanos, final long currentDurationNanos) {
+            return ttl(value);
+        }
+
+        @Override
+        public long expireAfterRead(final Object key, final Object value,
+                                    final long currentTimeNanos, final long currentDurationNanos) {
+            return currentDurationNanos; // keep remaining TTL on read
+        }
+
+        private long ttl(final Object value) {
+            final boolean miss = value instanceof NullValue
+                    || (value instanceof Optional<?> optional && optional.isEmpty());
+            return miss ? NEGATIVE_TTL_NANOS : positiveTtlNanos;
+        }
     }
 
     @Bean

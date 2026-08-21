@@ -7,10 +7,14 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
+import java.util.Optional;
+
 /**
  * Registry/route lookups via adsbdb.com (free, keyless): aircraft details by transponder
- * hex (near-static, cached 24h) and flight route by callsign (cached 1h). Any failure
- * returns null so the screen simply skips enrichment pages.
+ * hex (near-static, cached 24h) and flight route by callsign (cached 1h). Misses and
+ * failures return {@link Optional#empty()} and are negatively cached for 15 minutes
+ * (variable expiry in {@code ClientCacheConfiguration}) so unknown hexes/callsigns are
+ * re-checked periodically without re-fetching every slot.
  */
 @Slf4j
 @Service
@@ -21,9 +25,9 @@ public class AdsbdbAircraftInfoClient implements AircraftInfoClient {
 
     @Override
     @Cacheable("adsbdbAircraft")
-    public AdsbdbAircraftData getAircraftDetails(final String hex) {
+    public Optional<AdsbdbAircraftData> getAircraftDetails(final String hex) {
         if (hex == null || hex.isBlank()) {
-            return null;
+            return Optional.empty();
         }
         try {
             final AdsbdbResponse body = adsbdbRestClient.get()
@@ -32,19 +36,18 @@ public class AdsbdbAircraftInfoClient implements AircraftInfoClient {
                     .retrieve()
                     .body(AdsbdbResponse.class);
             final AdsbdbAircraftData data = body != null && body.response() != null ? body.response().aircraft() : null;
-            // Cache real hits only; 404s/nulls re-fetch next slot (cheap, and adsbdb data grows over time).
-            return data != null && data.modeS() != null ? data : null;
+            return data != null && data.modeS() != null ? Optional.of(data) : Optional.empty();
         } catch (final RuntimeException e) {
             log.debug("adsbdb aircraft lookup failed for {}: {}", hex, rootMessage(e));
-            return null;
+            return Optional.empty();
         }
     }
 
     @Override
     @Cacheable("adsbdbRoute")
-    public AdsbdbRouteData getRoute(final String callsign) {
+    public Optional<AdsbdbRouteData> getRoute(final String callsign) {
         if (callsign == null || callsign.isBlank()) {
-            return null;
+            return Optional.empty();
         }
         try {
             final AdsbdbResponse body = adsbdbRestClient.get()
@@ -52,10 +55,10 @@ public class AdsbdbAircraftInfoClient implements AircraftInfoClient {
                     .accept(MediaType.APPLICATION_JSON)
                     .retrieve()
                     .body(AdsbdbResponse.class);
-            return body != null && body.response() != null ? body.response().flightroute() : null;
+            return Optional.ofNullable(body != null && body.response() != null ? body.response().flightroute() : null);
         } catch (final RuntimeException e) {
             log.debug("adsbdb route lookup failed for {}: {}", callsign, rootMessage(e));
-            return null;
+            return Optional.empty();
         }
     }
 

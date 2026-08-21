@@ -9,6 +9,8 @@ import nl.ctasoftware.crypto.ticker.server.model.panel.config.FrameScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenType;
 import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbAircraftData;
+import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbRouteData;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AircraftClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AircraftEnrichment;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AircraftInfoClient;
@@ -22,6 +24,10 @@ import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Slf4j
 @Service
@@ -33,16 +39,28 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
     public static final int DEFAULT_FRAME_DELAY_MS = 100;
 
     /**
-     * Target sweep revolution period, independent of the slot length. Each slot rotates
-     * by a whole number of revolutions (see {@link #renderFrames}) starting from a fixed
-     * base angle, so it ends exactly where it started: consecutive radar slots chain
-     * seamlessly (the sweep pauses for the inline upload, then moves on), and panel-side
-     * loop restarts are invisible. A wall-clock phase does NOT work here: playback starts
-     * only after the upload completes, at a variable delay from render time.
+     * Target sweep revolution period, independent of the slot length. The radar frame
+     * sequence spans exactly {@link #SWEEP_LOOP_REVOLUTIONS} whole revolutions starting
+     * from a fixed base angle, so it ends exactly where it started: the panel replays
+     * the uploaded frames modulo for the whole slot, and the loop restart is invisible.
+     * A wall-clock phase does NOT work here: playback starts only after the upload
+     * completes, at a variable delay from render time.
      */
     static final long SWEEP_REVOLUTION_MS = 4000;
 
-    /** Info page dwell for the radar column's alternating route page. */
+    /**
+     * Whole sweep revolutions per radar loop: the loop covers one full info-page cycle
+     * ({@code SWEEP_LOOP_REVOLUTIONS} × {@link #SWEEP_REVOLUTION_MS}), so both the sweep
+     * and the alternating route page complete whole cycles inside the loop.
+     */
+    static final int SWEEP_LOOP_REVOLUTIONS = 2;
+
+    /**
+     * Info-page dwell for the radar column's alternating route page. The loop duration
+     * is an exact multiple of this, so the alternation flips at the loop's frame
+     * midpoint — a dwell of exactly {@code PAGE_DWELL_MS} whenever the frame delay
+     * divides it evenly (default 100 ms → 40 frames per page).
+     */
     static final long PAGE_DWELL_MS = 4000;
 
     // Radar scope geometry: 32x32 square in the left half, right half is an info column.
@@ -105,27 +123,50 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
 
     /* --------------------------------------------------------------------
      * RADAR frames
-     * ------------------------------------------------------------------*/
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Radar loop frame count: {@link #SWEEP_LOOP_REVOLUTIONS} whole sweep revolutions
+     * covering one full info-page cycle, one frame per delay tick — the slot duration
+     * no longer drives it, because the panel replays the frames modulo for the whole
+     * slot. Clamped to the protocol's 2–200 frame limits.
+     */
+    static int radarFrameCount(final int frameDelayMs) {
+        return Math.max(2, Math.min(200,
+                (int) (SWEEP_LOOP_REVOLUTIONS * SWEEP_REVOLUTION_MS / frameDelayMs)));
+    }
+
+    /**
+     * Sweep angle in integer degrees of 0-based frame {@code frameIndex}: integer steps
+     * of {@code 360 × SWEEP_LOOP_REVOLUTIONS / frameCount}, so the last frame lands on
+     * an exact multiple of 360° and the wrap stays continuous across the modulo loop
+     * boundary (the sweep starts and ends at the same angle).
+     */
+    static int radarSweepDeg(final int frameIndex, final int frameCount) {
+        return (frameIndex + 1) * 360 * SWEEP_LOOP_REVOLUTIONS / frameCount;
+    }
+
+    /**
+     * Route/telemetry page flip at the loop's frame midpoint: exactly one alternation
+     * per half loop, phase-stable across the modulo loop boundary by construction
+     * (equals a {@link #PAGE_DWELL_MS} wall-clock dwell when the delay divides it evenly).
+     */
+    static boolean radarRoutePage(final int frameIndex, final int frameCount) {
+        return (2 * frameIndex / frameCount) % 2 == 1;
+    }
 
     private List<BufferedImage> radarFrames(final List<NearbyAircraft> aircraft,
                                             final AircraftScreenConfig screenConfig) {
-        final long slotMillis = screenConfig.durationSeconds() * 1000L;
         final int frameDelayMs = Math.max(FrameScreenConfig.MIN_FRAME_DELAY_MS, screenConfig.frameDelayMs());
-        final int frameCount = (int) Math.max(2, Math.min(200,
-                Math.round(slotMillis / (double) frameDelayMs)));
-
-        // Whole revolutions per slot: the sweep ends a slot exactly where it began, so
-        // loop restarts and consecutive slots continue the rotation instead of snapping.
-        final int revolutions = (int) Math.max(1, Math.ceil(slotMillis / (double) SWEEP_REVOLUTION_MS));
-        final double stepDeg = 360.0 * revolutions / frameCount;
+        final int frameCount = radarFrameCount(frameDelayMs);
 
         final AircraftEnrichment enrichment = enrichClosest(aircraft);
         final boolean hasRoutePage = enrichment != null && (enrichment.hasRoute() || enrichment.owner() != null);
 
         final var frames = new java.util.ArrayList<BufferedImage>(frameCount);
         for (int i = 0; i < frameCount; i++) {
-            final boolean routePage = hasRoutePage && (i * (long) frameDelayMs / PAGE_DWELL_MS) % 2 == 1;
-            frames.add(renderRadarFrame(aircraft, (i + 1) * stepDeg, screenConfig, enrichment, routePage));
+            final boolean routePage = hasRoutePage && radarRoutePage(i, frameCount);
+            frames.add(renderRadarFrame(aircraft, radarSweepDeg(i, frameCount), screenConfig, enrichment, routePage));
         }
         return frames;
     }
@@ -324,15 +365,37 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
         return image;
     }
 
-    /** Enrichment for the closest aircraft; null when nothing could be resolved. */
+    /**
+     * Enrichment legs are short blocking HTTP lookups — one virtual thread per leg,
+     * no pooling or lifecycle to manage.
+     */
+    private static final ExecutorService ENRICHMENT_EXECUTOR = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("aircraft-enrich-", 0).factory());
+
+    /**
+     * Enrichment for the closest aircraft; null when nothing could be resolved. The
+     * hex-details and callsign-route lookups run concurrently; a failing leg degrades
+     * to {@link Optional#empty()} instead of failing the render.
+     */
     private AircraftEnrichment enrichClosest(final List<NearbyAircraft> aircraft) {
         if (aircraft.isEmpty()) {
             return null;
         }
         final NearbyAircraft closest = aircraft.getFirst();
-        return AircraftEnrichment.of(
-                aircraftInfoClient.getAircraftDetails(closest.hex()),
-                aircraftInfoClient.getRoute(closest.callsign()));
+        final CompletableFuture<Optional<AdsbdbAircraftData>> details = CompletableFuture.supplyAsync(
+                () -> aircraftInfoClient.getAircraftDetails(closest.hex()), ENRICHMENT_EXECUTOR);
+        final CompletableFuture<Optional<AdsbdbRouteData>> route = CompletableFuture.supplyAsync(
+                () -> aircraftInfoClient.getRoute(closest.callsign()), ENRICHMENT_EXECUTOR);
+        return AircraftEnrichment.of(join(details).orElse(null), join(route).orElse(null));
+    }
+
+    private static <T> Optional<T> join(final CompletableFuture<Optional<T>> leg) {
+        try {
+            return leg.join();
+        } catch (final CompletionException e) {
+            log.warn("aircraft enrichment leg failed: {}", e.getCause() != null ? e.getCause().toString() : e.toString());
+            return Optional.empty();
+        }
     }
 
     private static String closestTypeLine(final NearbyAircraft a) {
