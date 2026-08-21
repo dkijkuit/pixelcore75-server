@@ -491,6 +491,52 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
         return batch.build();
     }
 
+    /**
+     * CLOSEST cycles its info pages as separate batches (the frame path's
+     * {@code closestStream} semantics: identity always, registry/route when enrichment
+     * resolves them, one pass through the pages with the same dwell math). LIST/RADAR
+     * and the no-aircraft case stay single-batch via the interface default.
+     */
+    @Override
+    public BatchStream renderCommandBatches(final AircraftScreenConfig screenConfig) {
+        if (screenConfig.displayMode() != AircraftDisplayMode.CLOSEST) {
+            return CommandScreenService.super.renderCommandBatches(screenConfig);
+        }
+
+        final List<NearbyAircraft> aircraft = getAircraft(screenConfig);
+        if (aircraft.isEmpty()) {
+            final CommandBatch batch = CommandBatch.builder().cls(AcmdMirror.BLACK);
+            noAircraftCommands(batch);
+            return new BatchStream(List.of(batch.build()), 0);
+        }
+
+        final AircraftEnrichment enrichment = enrichClosest(aircraft);
+        final var batches = new java.util.ArrayList<byte[]>(3);
+
+        final CommandBatch identity = CommandBatch.builder().cls(AcmdMirror.BLACK);
+        closestCommands(identity, aircraft, screenConfig);
+        batches.add(identity.build());
+        if (enrichment != null && enrichment.hasRegistry()) {
+            final CommandBatch registry = CommandBatch.builder().cls(AcmdMirror.BLACK);
+            registryCommands(registry, enrichment);
+            batches.add(registry.build());
+        }
+        if (enrichment != null && enrichment.hasRoute()) {
+            final CommandBatch route = CommandBatch.builder().cls(AcmdMirror.BLACK);
+            routeCommands(route, enrichment);
+            batches.add(route.build());
+        }
+        if (batches.size() == 1) {
+            return new BatchStream(batches, 0); // identity only: nothing to cycle
+        }
+        // Same dwell math as closestStream (page count >= 2 here, so the frame path's
+        // protocol-minimum padding never applies).
+        final long slotMillis = screenConfig.durationSeconds() * 1000L;
+        final long dwellMs = Math.max(FrameScreenConfig.MIN_FRAME_DELAY_MS,
+                Math.min(65_535, slotMillis / batches.size()));
+        return new BatchStream(batches, dwellMs);
+    }
+
     /** LIST: one TEXT row per aircraft — callsign left in its altitude color, distance right-aligned. */
     private void listCommands(final CommandBatch batch, final List<NearbyAircraft> aircraft) {
         if (aircraft.isEmpty()) {
@@ -533,6 +579,45 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
         final String flightLine = closestFlightLine(closest, screenConfig.units());
         textOrScroll(batch, cgPage, PAGE_CGPIXEL_ID, flightLine, 22, Color.GREEN);
         textOrScroll(batch, cgPage, PAGE_CGPIXEL_ID, closestDistanceLine(closest), 29, altitudeColor(closest));
+    }
+
+    /**
+     * Registry page (the frame path's registryPage as commands). Lines are
+     * fit-truncated to the canvas instead of scrolled: these pages hold up to four
+     * lines and a batch runs at most one parametric — a second SCROLL would render
+     * nothing at all, so the frame path's truncation look is the safe equivalent.
+     */
+    private void registryCommands(final CommandBatch batch, final AircraftEnrichment enrichment) {
+        final FontPageExtractor.FontPage page = cgPixelPage();
+        batch.fontPage(PAGE_CGPIXEL_ID, page.glyphs());
+        fitTextLine(batch, page, orDash(enrichment.owner()), 6, Color.CYAN);
+        fitTextLine(batch, page, orDash(enrichment.ownerCountry()), 13, Color.WHITE);
+        fitTextLine(batch, page, orDash(enrichment.manufacturer()), 20, Color.YELLOW);
+        fitTextLine(batch, page, orDash(enrichment.typeName()), 27, Color.GREEN);
+    }
+
+    /** Route page (the frame path's routePage as commands); same fit-truncation rule. */
+    private void routeCommands(final CommandBatch batch, final AircraftEnrichment enrichment) {
+        final FontPageExtractor.FontPage page = cgPixelPage();
+        batch.fontPage(PAGE_CGPIXEL_ID, page.glyphs());
+        fitTextLine(batch, page, enrichment.originCode() + ">" + enrichment.destinationCode(), 6, Color.GREEN);
+        fitTextLine(batch, page, orDash(enrichment.originCity()), 13, Color.WHITE);
+        fitTextLine(batch, page, orDash(enrichment.destinationCity()), 20, Color.WHITE);
+        fitTextLine(batch, page, orDash(enrichment.airlineName()), 27, Color.YELLOW);
+    }
+
+    /** TEXT at the frame path's baseline, truncated to the frame path's 12 chars and to the canvas width. */
+    private static void fitTextLine(final CommandBatch batch, final FontPageExtractor.FontPage page,
+                                    final String text, final int baselineY, final Color color) {
+        textLine(batch, page, PAGE_CGPIXEL_ID, fitTruncate(page, text), 0, baselineY, color);
+    }
+
+    private static String fitTruncate(final FontPageExtractor.FontPage page, final String text) {
+        String fitted = truncate(text, 12);
+        while (page.width(fitted) > AcmdMirror.WIDTH && fitted.length() > 1) {
+            fitted = fitted.substring(0, fitted.length() - 1);
+        }
+        return fitted;
     }
 
     /** RADAR: CIRC rings + FILL blips (the frame path's projection) + info-column TEXT + one SWEEP. */

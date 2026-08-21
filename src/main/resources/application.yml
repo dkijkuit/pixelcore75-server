@@ -53,7 +53,7 @@ pixelcore75:
   # uploads. Opt-in, default OFF — old firmware does not subscribe to /cmd. Rollout:
   # flash ACMD-capable firmware first (backward compatible), then enable.
   command-encoding:
-    enabled: false
+    enabled: true
 
   jwt:
     secret: my-access-secret-change-me-my-access-secret-change-me

@@ -203,16 +203,18 @@ public class PanelScreenJob implements ReschedulableJob {
 
         log.debug("------> Rendering screen {} for panel {}", screenConfig.screenType(), panelConfig.getPanelId());
 
-        // ACMD command path (plan §6): flag ON + the service implements it → publish one
-        // batch to <serial>/cmd. Batch build failures fall back to the screen's regular
-        // path (the flag is a fleet-wide toggle, a single screen must not break a slot).
+        // ACMD command path (plan §6): flag ON + the service implements it → publish the
+        // first batch to <serial>/cmd (multi-page screens cycle their further batches at
+        // each page dwell). Batch build failures fall back to the screen's regular path
+        // (the flag is a fleet-wide toggle, a single screen must not break a slot).
         if (commandEncodingEnabled && screenService instanceof CommandScreenService) {
             @SuppressWarnings("unchecked")
             final CommandScreenService<ScreenConfig> commandScreenService =
                     (CommandScreenService<ScreenConfig>) screenService;
-            final byte[] batch = buildCommandBatch(commandScreenService, screenConfig);
-            if (batch != null) {
-                renderCommandScreen(batch, screenConfig, previewGeneration);
+            final CommandScreenService.BatchStream stream =
+                    buildCommandBatches(commandScreenService, screenConfig);
+            if (stream != null) {
+                renderCommandScreen(stream, screenConfig, previewGeneration);
                 return;
             }
         }
@@ -340,11 +342,11 @@ public class PanelScreenJob implements ReschedulableJob {
         }
     }
 
-    /** Builds the batch, or null (logged) when the command rendering fails — caller falls back. */
-    private byte[] buildCommandBatch(final CommandScreenService<ScreenConfig> screenService,
-                                     final ScreenConfig screenConfig) {
+    /** Builds the batch stream, or null (logged) when the command rendering fails — caller falls back. */
+    private CommandScreenService.BatchStream buildCommandBatches(
+            final CommandScreenService<ScreenConfig> screenService, final ScreenConfig screenConfig) {
         try {
-            return screenService.renderCommandBatch(screenConfig);
+            return screenService.renderCommandBatches(screenConfig);
         } catch (final Exception e) {
             log.error("Command batch build failed for screen {} on panel {}; using the frame path",
                     screenConfig.screenType(), panelConfig.getPanelId(), e);
@@ -353,36 +355,114 @@ public class PanelScreenJob implements ReschedulableJob {
     }
 
     /**
-     * ACMD v1 command path (plan §6): publishes one fully framed batch to
+     * ACMD v1 command path (plan §6): publishes the first fully framed batch to
      * {@code <serial>/cmd} — QoS 0, not retained, no ack (fire-and-forget) — and counts
-     * the slot from the send time. Command screens publish no retained base image;
-     * any retained frame left by an earlier static screen is cleared with an empty
-     * retained publish (live panels ignore zero-length base payloads; a panel booting
-     * mid-slot must not be served a stale screen). The SSE preview is driven from the
+     * the slot from the send time. Multi-page screens ({@link CommandScreenService.BatchStream}
+     * with a dwell) cycle their remaining batches at each page boundary via
+     * {@link #cycleCommandPages}. Command screens publish no retained base image; any
+     * retained frame left by an earlier static screen is cleared with an empty retained
+     * publish (live panels ignore zero-length base payloads; a panel booting mid-slot
+     * must not be served a stale screen). The SSE preview is driven from the
      * {@link AcmdMirror} on the slot's virtual timeline — exactly what an ACMD panel
      * renders, so preview parity comes for free.
      */
-    private void renderCommandScreen(final byte[] batch, final ScreenConfig screenConfig,
-                                     final int previewGeneration) {
+    private void renderCommandScreen(final CommandScreenService.BatchStream stream,
+                                     final ScreenConfig screenConfig, final int previewGeneration) {
         final String serial = px75Panel.getSerial();
         final long slotNanos = Duration.ofSeconds(screenConfig.durationSeconds()).toNanos();
         try {
             mqttClient.publish(serial, new byte[0], 1, true);
+            final byte[] firstBatch = stream.batches().getFirst();
             final long sendNanos = System.nanoTime();
-            mqttClient.publish(serial + CMD_TOPIC, batch, 0, false);
-            log.info("------> Command batch ({} bytes) sent to panel {} for screen {}",
-                    batch.length, serial, screenConfig.screenType());
+            publishCommandBatch(previewGeneration, firstBatch);
+            log.info("------> Command batch ({} bytes, {} pages) sent to panel {} for screen {}",
+                    firstBatch.length, stream.batches().size(), serial, screenConfig.screenType());
 
-            final AcmdMirror mirror = AcmdMirror.parse(batch);
-            final BufferedImage baseImage = AcmdMirror.toBufferedImage(mirror.frameAt(0));
+            final List<AcmdMirror> mirrors = new java.util.ArrayList<>(stream.batches().size());
+            for (final byte[] pageBatch : stream.batches()) {
+                mirrors.add(AcmdMirror.parse(pageBatch));
+            }
+
+            final BufferedImage baseImage = AcmdMirror.toBufferedImage(mirrors.getFirst().frameAt(0));
             final String imageFilename = "generated_images/" + serial + ".png";
             ImageIO.write(baseImage, "PNG", new File(imageFilename));
             scaleImageAndPublish(baseImage);
             final long deadlineNanos = sendNanos + slotNanos;
-            Thread.startVirtualThread(() ->
-                    streamCommandPreview(previewGeneration, mirror, sendNanos, deadlineNanos));
+            if (stream.batches().size() == 1 || stream.pageDwellMs() <= 0) {
+                final AcmdMirror mirror = mirrors.getFirst();
+                Thread.startVirtualThread(() ->
+                        streamCommandPreview(previewGeneration, mirror, sendNanos, deadlineNanos));
+            } else {
+                Thread.startVirtualThread(() ->
+                        cycleCommandPages(previewGeneration, stream, mirrors, sendNanos, deadlineNanos));
+            }
         } catch (IOException | MqttException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Publishes one command batch to {@code <serial>/cmd} while holding the serial's
+     * preview-generation monitor, re-checking the generation inside it: a newer render
+     * (rotation boundary, config save) bumps the generation before its own batch
+     * publish, so a stale page-flip thread can never land an old page after that — at
+     * worst its page lands just before it and the wire order keeps the new batch final.
+     */
+    private void publishCommandBatch(final int generation, final byte[] batch) throws MqttException {
+        final AtomicInteger generationCounter = previewGenerations
+                .computeIfAbsent(px75Panel.getSerial(), k -> new AtomicInteger());
+        synchronized (generationCounter) {
+            if (generation != generationCounter.get()) {
+                return; // superseded while waiting for the monitor
+            }
+            mqttClient.publish(px75Panel.getSerial() + CMD_TOPIC, batch, 0, false);
+        }
+    }
+
+    /**
+     * Page-cycling command screens: flips {@code <serial>/cmd} to the next batch at
+     * each {@code pageDwellMs} boundary (each page's parametrics restart at its flip,
+     * exactly what the panel does on a fresh batch) and drives the SSE preview from
+     * that page's mirror on the same virtual timeline. Mirrors the frame path's
+     * page-stream semantics: one pass through the pages, the last page holds until the
+     * slot ends. Stops like {@link #streamCommandPreview}: superseded by a newer
+     * render, slot end, or interruption.
+     */
+    private void cycleCommandPages(final int generation, final CommandScreenService.BatchStream stream,
+                                   final List<AcmdMirror> mirrors, final long sendNanos,
+                                   final long deadlineNanos) {
+        final List<byte[]> batches = stream.batches();
+        final long pageDwellMs = stream.pageDwellMs();
+        int currentPage = 0;
+        while (running.get()
+                && generation == currentPreviewGeneration()
+                && System.nanoTime() < deadlineNanos) {
+            final long elapsedMs = Math.max(0, (System.nanoTime() - sendNanos) / 1_000_000);
+            final int pageIndex = (int) Math.min(elapsedMs / pageDwellMs, (long) (batches.size() - 1));
+            if (pageIndex != currentPage) {
+                currentPage = pageIndex;
+                final byte[] pageBatch = batches.get(currentPage);
+                try {
+                    publishCommandBatch(generation, pageBatch);
+                    log.debug("------> Command page {} ({} bytes) sent to panel {}",
+                            currentPage, pageBatch.length, px75Panel.getSerial());
+                } catch (MqttException e) {
+                    log.error("Failed to publish command page for panel {}", panelConfig.getPanelId(), e);
+                }
+            }
+            try {
+                scaleImageAndPublish(AcmdMirror.toBufferedImage(
+                        mirrors.get(currentPage).frameAt(elapsedMs - currentPage * pageDwellMs)));
+            } catch (IOException e) {
+                log.error("Failed to broadcast command preview frame for panel {}", panelConfig.getPanelId(), e);
+                return;
+            }
+            try {
+                Thread.sleep(COMMAND_PREVIEW_TICK_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
         }
     }
 

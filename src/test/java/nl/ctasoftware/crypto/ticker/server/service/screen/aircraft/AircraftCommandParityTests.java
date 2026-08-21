@@ -10,6 +10,9 @@ import nl.ctasoftware.crypto.ticker.server.service.command.AcmdParser;
 import nl.ctasoftware.crypto.ticker.server.service.command.FontPageExtractor;
 import nl.ctasoftware.crypto.ticker.server.service.command.FrameParity;
 import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbAircraftData;
+import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbRouteData;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AircraftClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AircraftInfoClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.NearbyAircraft;
@@ -23,6 +26,7 @@ import java.io.File;
 import java.util.List;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -107,6 +111,66 @@ class AircraftCommandParityTests {
         final int mismatch = FrameParity.mismatchedPixels(FrameParity.rgb565(golden), mirror.frameAt(0));
         assertTrue(mismatch <= TEXT_MISMATCH_BUDGET,
                 "CLOSEST parity: " + mismatch + " mismatched px, budget " + TEXT_MISMATCH_BUDGET);
+    }
+
+    @Test
+    void closestCommandBatchesCycleRegistryAndRoutePages() {
+        final AircraftScreenConfig config = config(AircraftDisplayMode.CLOSEST);
+        when(infoClient.getAircraftDetails("484507")).thenReturn(Optional.of(details()));
+        when(infoClient.getRoute("KLM123")).thenReturn(Optional.of(route()));
+
+        final CommandScreenService.BatchStream stream = service.renderCommandBatches(config);
+
+        assertEquals(3, stream.batches().size(), "identity + registry + route pages");
+        assertEquals(10_000, stream.pageDwellMs(), "30 s slot spread evenly over 3 pages");
+
+        // Golden pages come from the frame path (same enrichment); the cycled batches
+        // must render pages 2 and 3 like the frames the panel would have played.
+        final List<BufferedImage> goldenPages = service.renderFrameStream(config).frames();
+        assertTextPageParity(goldenPages.get(1), stream.batches().get(1), "registry");
+        assertTextPageParity(goldenPages.get(2), stream.batches().get(2), "route");
+    }
+
+    @Test
+    void closestWithoutEnrichmentRendersASingleIdentityBatch() {
+        final AircraftScreenConfig config = config(AircraftDisplayMode.CLOSEST);
+
+        final CommandScreenService.BatchStream stream = service.renderCommandBatches(config);
+
+        assertEquals(1, stream.batches().size(), "identity page only when no enrichment resolves");
+        assertEquals(0, stream.pageDwellMs(), "nothing to cycle");
+        assertArrayEquals(service.renderCommandBatch(config), stream.batches().getFirst());
+    }
+
+    @Test
+    void listAndRadarModesKeepASingleBatch() {
+        for (final AircraftDisplayMode mode : List.of(AircraftDisplayMode.LIST, AircraftDisplayMode.RADAR)) {
+            final CommandScreenService.BatchStream stream = service.renderCommandBatches(config(mode));
+
+            assertEquals(1, stream.batches().size(), mode + " has no pages to cycle");
+            assertEquals(0, stream.pageDwellMs());
+        }
+    }
+
+    private static void assertTextPageParity(final BufferedImage golden, final byte[] batch, final String label) {
+        final AcmdMirror mirror = AcmdMirror.parse(batch);
+        assertFalse(mirror.hasParametric(), label + " page is static");
+
+        final int mismatch = FrameParity.mismatchedPixels(FrameParity.rgb565(golden), mirror.frameAt(0));
+        assertTrue(mismatch <= TEXT_MISMATCH_BUDGET,
+                label + " parity: " + mismatch + " mismatched px, budget " + TEXT_MISMATCH_BUDGET);
+    }
+
+    private static AdsbdbAircraftData details() {
+        return new AdsbdbAircraftData("A319", "A319", "Airbus", "484507", "PH-EXM",
+                "United Kingdom", "British Airways");
+    }
+
+    private static AdsbdbRouteData route() {
+        return new AdsbdbRouteData("KLM123",
+                new AdsbdbRouteData.Airline("KLM", "KLM", "KL", "Netherlands"),
+                new AdsbdbRouteData.Airport(null, "Amsterdam", "AMS", null, null),
+                new AdsbdbRouteData.Airport(null, "New York", "JFK", null, null));
     }
 
     @Test

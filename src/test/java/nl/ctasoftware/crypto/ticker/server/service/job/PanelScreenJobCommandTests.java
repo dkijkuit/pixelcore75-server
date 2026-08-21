@@ -31,13 +31,14 @@ import org.mockito.ArgumentCaptor;
 import java.awt.image.BufferedImage;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -72,7 +73,9 @@ class PanelScreenJobCommandTests {
     private ImageService imageService;
     private ImageBroadcasterService broadcaster;
     private IMqttMessageListener loadedListener;
-    private final List<Pub> pubs = new ArrayList<>();
+
+    /** Written from the job thread AND the page-flip virtual thread — must be thread-safe. */
+    private final List<Pub> pubs = new CopyOnWriteArrayList<>();
     private final Map<BufferedImage, byte[]> frameBytes = new HashMap<>();
 
     /** Firmware stand-in for the frame-path test: acks uploads like main.cpp does. */
@@ -183,6 +186,33 @@ class PanelScreenJobCommandTests {
         }
     }
 
+    /** A CLOSEST-style screen cycling two command pages at a 300 ms dwell. */
+    private static final class StubPagedService implements CommandScreenService<ScreenConfig> {
+        @Override
+        public ScreenType getScreenType() {
+            return ScreenType.NEARBY_AIRCRAFT;
+        }
+
+        @Override
+        public Optional<BufferedImage> renderScreen(final ScreenConfig screenConfig) {
+            return Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+        }
+
+        @Override
+        public byte[] renderCommandBatch(final ScreenConfig screenConfig) {
+            return page(10, 10, 0xF800);
+        }
+
+        @Override
+        public BatchStream renderCommandBatches(final ScreenConfig screenConfig) {
+            return new BatchStream(List.of(page(10, 10, 0xF800), page(20, 20, 0x001F)), 300);
+        }
+
+        private static byte[] page(final int x, final int y, final int color) {
+            return CommandBatch.builder().cls(0x0000).pix(x, y, color).build();
+        }
+    }
+
     /* ------------------------------------------------------------------ */
 
     @Test
@@ -260,7 +290,40 @@ class PanelScreenJobCommandTests {
                 "no ANIM upload anywhere in the rotation");
     }
 
+    @Test
+    void flagOnCyclesCommandPagesAtTheDwellUntilTheSlotEnds() throws Exception {
+        newJob(true, new StubPagedService(), pagedConfig()).run();
+
+        // Initial page publishes synchronously; the flip to page 2 lands within a
+        // preview tick after the 300 ms dwell.
+        awaitCmdPubs(2, 2_000);
+
+        final List<Pub> cmdPubs = pubs(p -> p.topic().equals(SERIAL + "/cmd"));
+        assertEquals(2, cmdPubs.size(), "initial page + one flip; page 2 holds until the slot ends");
+        assertTrue(Arrays.equals(StubPagedService.page(10, 10, 0xF800), cmdPubs.get(0).payload()),
+                "identity page first");
+        assertTrue(Arrays.equals(StubPagedService.page(20, 20, 0x001F), cmdPubs.get(1).payload()),
+                "second page flipped at the dwell");
+        assertEquals(0, cmdPubs.get(1).qos(), "page flips stay QoS 0");
+        assertFalse(cmdPubs.get(1).retained(), "page flips are not retained");
+
+        // Past the slot deadline (1 s from the send) the cycle must have stopped.
+        Thread.sleep(1_500);
+        assertEquals(2, pubs(p -> p.topic().equals(SERIAL + "/cmd")).size(),
+                "no publishes after the slot ends");
+    }
+
     /* ------------------------------------------------------------------ */
+
+    private void awaitCmdPubs(final int count, final long timeoutMs) throws InterruptedException {
+        final long deadline = System.currentTimeMillis() + timeoutMs;
+        while (pubs(p -> p.topic().equals(SERIAL + "/cmd")).size() < count
+                && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        assertEquals(count, pubs(p -> p.topic().equals(SERIAL + "/cmd")).size(),
+                "expected " + count + " /cmd publishes within " + timeoutMs + " ms");
+    }
 
     private List<Pub> pubs(final java.util.function.Predicate<Pub> filter) {
         return pubs.stream().filter(filter).toList();
@@ -294,6 +357,12 @@ class PanelScreenJobCommandTests {
     private static AircraftScreenConfig radarConfig() {
         return new AircraftScreenConfig(ScreenType.NEARBY_AIRCRAFT, 1,
                 AircraftScreenConfig.AircraftDisplayMode.RADAR, null, 50, false,
+                AircraftScreenConfig.AircraftDisplayUnits.AVIATION, 100);
+    }
+
+    private static AircraftScreenConfig pagedConfig() {
+        return new AircraftScreenConfig(ScreenType.NEARBY_AIRCRAFT, 1,
+                AircraftScreenConfig.AircraftDisplayMode.CLOSEST, null, 50, false,
                 AircraftScreenConfig.AircraftDisplayUnits.AVIATION, 100);
     }
 
