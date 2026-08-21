@@ -222,7 +222,7 @@ class PanelScreenJobHashSkipTests {
 
         final ConcurrentMap<String, AtomicInteger> previewGenerations = new ConcurrentHashMap<>();
         return new PanelScreenJob(px75Panel, panelConfig, services, imageService, mqttClient,
-                mock(ImageBroadcasterService.class), ackService, previewGenerations);
+                mock(ImageBroadcasterService.class), ackService, previewGenerations, false);
     }
 
     private AnimationScreenConfig animConfig() {

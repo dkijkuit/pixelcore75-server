@@ -48,6 +48,13 @@ pixelcore75:
     apikey: ${SOCCER_API_KEY:}
     basePath: https://sports.core.api.espn.com/v2/sports/
 
+  # ACMD v1 command encoding (plan §6): screens whose service implements
+  # CommandScreenService publish a command batch to <serial>/cmd instead of frame
+  # uploads. Opt-in, default OFF — old firmware does not subscribe to /cmd. Rollout:
+  # flash ACMD-capable firmware first (backward compatible), then enable.
+  command-encoding:
+    enabled: false
+
   jwt:
     secret: my-access-secret-change-me-my-access-secret-change-me
     refresh-secret: my-refresh-secret-change-me-my-refresh-secret-change-me

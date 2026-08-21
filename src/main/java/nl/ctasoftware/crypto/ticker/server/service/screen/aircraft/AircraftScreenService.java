@@ -7,7 +7,12 @@ import nl.ctasoftware.crypto.ticker.server.model.panel.config.AircraftScreenConf
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.AircraftScreenConfig.AircraftDisplayUnits;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.FrameScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenType;
+import nl.ctasoftware.crypto.ticker.server.service.command.AcmdMirror;
+import nl.ctasoftware.crypto.ticker.server.service.command.CommandBatch;
+import nl.ctasoftware.crypto.ticker.server.service.command.FontPageExtractor;
+import nl.ctasoftware.crypto.ticker.server.service.command.Rgb565;
 import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbAircraftData;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbRouteData;
@@ -32,7 +37,8 @@ import java.util.concurrent.Executors;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class AircraftScreenService implements FrameScreenService<AircraftScreenConfig> {
+public class AircraftScreenService implements FrameScreenService<AircraftScreenConfig>,
+        CommandScreenService<AircraftScreenConfig> {
 
     public static final int MIN_RADIUS_NM = 5;
     public static final int MAX_RADIUS_NM = 250;
@@ -72,12 +78,37 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
     static final Color SCOPE_GREEN = new Color(0, 90, 0);
     static final Color SCOPE_RING = new Color(0, 50, 0);
     static final Color SWEEP_TRAIL = new Color(0, 60, 0);
+    static final Color SWEEP_LEAD = new Color(0, 255, 0);
+
+    /* --------------------------------------------------------------------
+     * ACMD command path (plan §6): font page ids shared with the other
+     * command screens (batches are self-contained, this is convention only).
+     * ------------------------------------------------------------------ */
+    static final int PAGE_LEDBOARD_ID = 0;
+    static final int PAGE_CGPIXEL_ID = 1;
+
+    /** SCROLL pace for lines that overflow the canvas (ms per pixel, ~17 px/s). */
+    static final int SCROLL_MS_PER_PX = 60;
+
+    /** SCROLL clip window height: one cgPixel text row plus a pixel of clearance. */
+    static final int SCROLL_REGION_HEIGHT = 8;
+
+    /** GFX ring radii standing in for the frame path's AWT ovals (boxes 16 and 14). */
+    static final int SCOPE_RING_MID_RADIUS = 8;
+    static final int SCOPE_RING_INNER_RADIUS = 7;
+
+    /** ACMD SWEEP speed: one revolution per SWEEP_REVOLUTION_MS (4000 ms → 90°/s). */
+    static final int SWEEP_DEG_PER_SEC = (int) Math.round(360_000.0 / SWEEP_REVOLUTION_MS);
 
     final PaintToolsService paintToolsService;
     final Font ledBoardFont8Px;
     final Font cgPixel5Px;
     final AircraftClient aircraftClient;
     final AircraftInfoClient aircraftInfoClient;
+
+    /** Extracted FONT pages (deterministic per TTF+size), computed on first command render. */
+    private volatile FontPageExtractor.FontPage ledBoardPage;
+    private volatile FontPageExtractor.FontPage cgPixelPage;
 
     @Override
     public ScreenType getScreenType() {
@@ -239,7 +270,7 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
     private void drawSweep(final BufferedImage image, final double sweepDeg) {
         final Graphics2D g = (Graphics2D) image.getGraphics();
         final Color[] trail = {
-                new Color(0, 255, 0), new Color(0, 200, 0), new Color(0, 150, 0),
+                SWEEP_LEAD, new Color(0, 200, 0), new Color(0, 150, 0),
                 new Color(0, 105, 0), new Color(0, 65, 0), SWEEP_TRAIL
         };
         for (int k = 0; k < trail.length; k++) {
@@ -399,9 +430,13 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
     }
 
     private static String closestTypeLine(final NearbyAircraft a) {
+        return truncate(fullTypeLine(a), 12);
+    }
+
+    private static String fullTypeLine(final NearbyAircraft a) {
         final String type = a.type() != null ? a.type() : "?";
         final String reg = a.registration() != null ? a.registration() : "";
-        return truncate((type + " " + reg).trim(), 12);
+        return (type + " " + reg).trim();
     }
 
     private static String closestFlightLine(final NearbyAircraft a, final AircraftDisplayUnits units) {
@@ -435,6 +470,164 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
             y += 6;
         }
         return image;
+    }
+
+    /* --------------------------------------------------------------------
+     * ACMD command path (plan §6): the same data fetch as the frame path,
+     * rendering swapped to ACMD primitives. Every batch starts with CLS
+     * black, embeds its FONT pages, and — for RADAR — ends with one SWEEP
+     * the panel ticks locally: zero per-frame MQTT traffic.
+     * ------------------------------------------------------------------ */
+
+    @Override
+    public byte[] renderCommandBatch(final AircraftScreenConfig screenConfig) {
+        final List<NearbyAircraft> aircraft = getAircraft(screenConfig);
+        final CommandBatch batch = CommandBatch.builder().cls(AcmdMirror.BLACK);
+        switch (screenConfig.displayMode()) {
+            case LIST -> listCommands(batch, aircraft);
+            case CLOSEST -> closestCommands(batch, aircraft, screenConfig);
+            case RADAR -> radarCommands(batch, aircraft, screenConfig);
+        }
+        return batch.build();
+    }
+
+    /** LIST: one TEXT row per aircraft — callsign left in its altitude color, distance right-aligned. */
+    private void listCommands(final CommandBatch batch, final List<NearbyAircraft> aircraft) {
+        if (aircraft.isEmpty()) {
+            noAircraftCommands(batch);
+            return;
+        }
+        final FontPageExtractor.FontPage page = cgPixelPage();
+        batch.fontPage(PAGE_CGPIXEL_ID, page.glyphs());
+        final List<NearbyAircraft> top = aircraft.subList(0, Math.min(aircraft.size(), 5));
+        int baselineY = 5;
+        for (final NearbyAircraft a : top) {
+            textLine(batch, page, PAGE_CGPIXEL_ID, truncate(a.callsign(), 7), 0, baselineY, altitudeColor(a));
+            final String distance = Math.round(a.distanceNm()) + "NM";
+            textLine(batch, page, PAGE_CGPIXEL_ID, distance,
+                    AcmdMirror.WIDTH - page.width(distance), baselineY, Color.WHITE);
+            baselineY += 6;
+        }
+    }
+
+    /**
+     * CLOSEST: the identity page (callsign, type, telemetry, distance) — the one page
+     * every frame-stream cycle shows. Registry/route pages are frame-path only: one
+     * ACMD batch renders one static page. Lines that would overflow the canvas scroll
+     * their full text instead of being truncated.
+     */
+    private void closestCommands(final CommandBatch batch, final List<NearbyAircraft> aircraft,
+                                 final AircraftScreenConfig screenConfig) {
+        if (aircraft.isEmpty()) {
+            noAircraftCommands(batch);
+            return;
+        }
+        final NearbyAircraft closest = aircraft.getFirst();
+        final FontPageExtractor.FontPage ledPage = ledBoardPage();
+        final FontPageExtractor.FontPage cgPage = cgPixelPage();
+        batch.fontPage(PAGE_LEDBOARD_ID, ledPage.glyphs())
+                .fontPage(PAGE_CGPIXEL_ID, cgPage.glyphs());
+
+        textLine(batch, ledPage, PAGE_LEDBOARD_ID, truncate(closest.callsign(), 7), 0, 8, Color.WHITE);
+        textOrScroll(batch, cgPage, PAGE_CGPIXEL_ID, fullTypeLine(closest), 15, Color.CYAN);
+        final String flightLine = closestFlightLine(closest, screenConfig.units());
+        textOrScroll(batch, cgPage, PAGE_CGPIXEL_ID, flightLine, 22, Color.GREEN);
+        textOrScroll(batch, cgPage, PAGE_CGPIXEL_ID, closestDistanceLine(closest), 29, altitudeColor(closest));
+    }
+
+    /** RADAR: CIRC rings + FILL blips (the frame path's projection) + info-column TEXT + one SWEEP. */
+    private void radarCommands(final CommandBatch batch, final List<NearbyAircraft> aircraft,
+                               final AircraftScreenConfig screenConfig) {
+        // Scope rings in the frame path's draw order (inner, outer, innermost).
+        batch.circ(SCOPE_CX, SCOPE_CY, SCOPE_RING_MID_RADIUS, Rgb565.of(SCOPE_RING));
+        batch.circ(SCOPE_CX, SCOPE_CY, SCOPE_RADIUS, Rgb565.of(SCOPE_GREEN));
+        batch.circ(SCOPE_CX, SCOPE_CY, SCOPE_RING_INNER_RADIUS, Rgb565.of(SCOPE_RING));
+        batch.pix(SCOPE_CX, SCOPE_CY, Rgb565.of(SCOPE_GREEN));
+
+        // Static blips at the frame path's polar projection; fully lit (the command path
+        // has no sweep-phase decay — the SWEEP ticks over the static base).
+        final int radiusNm = Math.max(1, screenConfig.radiusNm());
+        for (final NearbyAircraft a : aircraft) {
+            final double r = Math.min(1.0, a.distanceNm() / radiusNm) * SCOPE_RADIUS;
+            final double rad = Math.toRadians(a.bearingDeg());
+            final int x = SCOPE_CX + (int) Math.round(r * Math.sin(rad));
+            final int y = SCOPE_CY - (int) Math.round(r * Math.cos(rad));
+            batch.fill(Math.max(1, x - 1), Math.max(1, y - 1), 2, 2, Rgb565.of(altitudeColor(a)));
+        }
+
+        // Info column, telemetry page (the alternating route page is frame-path only:
+        // the base canvas is static and the SWEEP is the batch's one parametric).
+        final FontPageExtractor.FontPage page = cgPixelPage();
+        batch.fontPage(PAGE_CGPIXEL_ID, page.glyphs());
+        if (aircraft.isEmpty()) {
+            textLine(batch, page, PAGE_CGPIXEL_ID, "NO", INFO_X, 11, Color.RED);
+            textLine(batch, page, PAGE_CGPIXEL_ID, "ACFT", INFO_X, 19, Color.RED);
+        } else {
+            final NearbyAircraft closest = aircraft.getFirst();
+            textLine(batch, page, PAGE_CGPIXEL_ID, truncate(closest.callsign(), 6), INFO_X, 5, Color.WHITE);
+            textLine(batch, page, PAGE_CGPIXEL_ID, Math.round(closest.distanceNm()) + "NM", INFO_X, 12, altitudeColor(closest));
+            textLine(batch, page, PAGE_CGPIXEL_ID, formatAltitude(closest, screenConfig.units()), INFO_X, 19, Color.CYAN);
+            textLine(batch, page, PAGE_CGPIXEL_ID, formatSpeed(closest, screenConfig.units()), INFO_X, 26, Color.YELLOW);
+        }
+
+        // The single parametric primitive (first wins): one revolution per SWEEP_REVOLUTION_MS.
+        batch.sweep(SCOPE_CX, SCOPE_CY, SCOPE_RADIUS, Rgb565.of(SWEEP_LEAD), SWEEP_DEG_PER_SEC);
+    }
+
+    private void noAircraftCommands(final CommandBatch batch) {
+        final FontPageExtractor.FontPage ledPage = ledBoardPage();
+        final FontPageExtractor.FontPage cgPage = cgPixelPage();
+        batch.fontPage(PAGE_LEDBOARD_ID, ledPage.glyphs())
+                .fontPage(PAGE_CGPIXEL_ID, cgPage.glyphs());
+        centerText(batch, ledPage, PAGE_LEDBOARD_ID, "NO ACFT", 15, Color.RED);
+        centerText(batch, cgPage, PAGE_CGPIXEL_ID, "IN RANGE", 26, Color.RED);
+    }
+
+    /** TEXT at the frame path's baseline (ACMD y = glyph line-box top = baseline + lineTop). */
+    private static void textLine(final CommandBatch batch, final FontPageExtractor.FontPage page,
+                                 final int pageId, final String text, final int x,
+                                 final int baselineY, final Color color) {
+        batch.text(pageId, x, baselineY + page.lineTop(), Rgb565.of(color), text);
+    }
+
+    private static void centerText(final CommandBatch batch, final FontPageExtractor.FontPage page,
+                                   final int pageId, final String text, final int baselineY, final Color color) {
+        textLine(batch, page, pageId, text, AcmdMirror.WIDTH / 2 - page.width(text) / 2, baselineY, color);
+    }
+
+    /**
+     * TEXT when the full string fits the canvas (then it is also what the frame path
+     * shows — its fixed truncation lengths never exceed the canvas); a string that
+     * overflows becomes one SCROLL of the whole, untruncated text across the line
+     * instead (the frame path would simply cut it off).
+     */
+    private static void textOrScroll(final CommandBatch batch, final FontPageExtractor.FontPage page,
+                                     final int pageId, final String fullText,
+                                     final int baselineY, final Color color) {
+        if (page.width(fullText) <= AcmdMirror.WIDTH) {
+            textLine(batch, page, pageId, fullText, 0, baselineY, color);
+            return;
+        }
+        batch.scroll(0, baselineY + page.lineTop(), AcmdMirror.WIDTH, SCROLL_REGION_HEIGHT,
+                pageId, Rgb565.of(color), SCROLL_MS_PER_PX, fullText);
+    }
+
+    private FontPageExtractor.FontPage ledBoardPage() {
+        FontPageExtractor.FontPage page = ledBoardPage;
+        if (page == null) {
+            page = FontPageExtractor.extract(ledBoardFont8Px);
+            ledBoardPage = page;
+        }
+        return page;
+    }
+
+    private FontPageExtractor.FontPage cgPixelPage() {
+        FontPageExtractor.FontPage page = cgPixelPage;
+        if (page == null) {
+            page = FontPageExtractor.extract(cgPixel5Px);
+            cgPixelPage = page;
+        }
+        return page;
     }
 
     /* --------------------------------------------------------------------

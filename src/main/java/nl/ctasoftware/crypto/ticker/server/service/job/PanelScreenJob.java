@@ -5,9 +5,11 @@ import lombok.extern.slf4j.Slf4j;
 import nl.ctasoftware.crypto.ticker.server.exception.ScreenServiceNotFoundException;
 import nl.ctasoftware.crypto.ticker.server.model.Px75Panel;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.*;
+import nl.ctasoftware.crypto.ticker.server.service.command.AcmdMirror;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageBroadcasterService;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageService;
 import nl.ctasoftware.crypto.ticker.server.service.panel.AnimationLoadAckService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.ScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.AircraftScreenService;
@@ -45,10 +47,14 @@ public class PanelScreenJob implements ReschedulableJob {
     static final String ANIM_START_TOPIC = "/anim/start";
     static final String ANIM_FRAME_TOPIC = "/anim/frame";
     static final String ANIM_PLAY_TOPIC = "/anim/play";
+    static final String CMD_TOPIC = "/cmd";
     static final byte ANIM_FLAG_STAGE_ONLY = 0x01;
     static final int ANIM_CODEC_MASK = 0x06;
     static final int ANIM_CODEC_RAW = 0x00;
     static final int ANIM_CODEC_PAL_RLE = 0x02;
+
+    /** SSE preview tick for command screens (ms): smooth for a 90°/s sweep, cheap otherwise. */
+    static final long COMMAND_PREVIEW_TICK_MS = 100;
 
     /**
      * Animation slots on the panel (must match firmware ANIM_MAX_SLOTS). Slot files double as a
@@ -87,6 +93,15 @@ public class PanelScreenJob implements ReschedulableJob {
     final IMqttClient mqttClient;
     final ImageBroadcasterService imageBroadcasterService;
     final AnimationLoadAckService animationLoadAckService;
+
+    /**
+     * {@code pixelcore75.command-encoding.enabled} (default false): screens whose service
+     * implements {@link CommandScreenService} render as ACMD batches on {@code <serial>/cmd}
+     * instead of frames/static images. Opt-in for the mixed fleet: old firmware never
+     * subscribes to {@code /cmd}, so emission must stay off until a panel runs ACMD firmware.
+     */
+    final boolean commandEncodingEnabled;
+
     private final AtomicBoolean running = new AtomicBoolean(true);
 
     @Getter
@@ -102,7 +117,8 @@ public class PanelScreenJob implements ReschedulableJob {
                           final ImageService imageService, final IMqttClient mqttClient,
                           final ImageBroadcasterService imageBroadcasterService,
                           final AnimationLoadAckService animationLoadAckService,
-                          final ConcurrentMap<String, AtomicInteger> previewGenerations) {
+                          final ConcurrentMap<String, AtomicInteger> previewGenerations,
+                          final boolean commandEncodingEnabled) {
         this.px75Panel = px75Panel;
         this.panelConfig = panelConfig;
         this.imageService = imageService;
@@ -113,6 +129,7 @@ public class PanelScreenJob implements ReschedulableJob {
         this.imageBroadcasterService = imageBroadcasterService;
         this.animationLoadAckService = animationLoadAckService;
         this.previewGenerations = previewGenerations;
+        this.commandEncodingEnabled = commandEncodingEnabled;
         this.id = px75Panel.getSerial();
     }
 
@@ -185,6 +202,20 @@ public class PanelScreenJob implements ReschedulableJob {
         }
 
         log.debug("------> Rendering screen {} for panel {}", screenConfig.screenType(), panelConfig.getPanelId());
+
+        // ACMD command path (plan §6): flag ON + the service implements it → publish one
+        // batch to <serial>/cmd. Batch build failures fall back to the screen's regular
+        // path (the flag is a fleet-wide toggle, a single screen must not break a slot).
+        if (commandEncodingEnabled && screenService instanceof CommandScreenService) {
+            @SuppressWarnings("unchecked")
+            final CommandScreenService<ScreenConfig> commandScreenService =
+                    (CommandScreenService<ScreenConfig>) screenService;
+            final byte[] batch = buildCommandBatch(commandScreenService, screenConfig);
+            if (batch != null) {
+                renderCommandScreen(batch, screenConfig, previewGeneration);
+                return;
+            }
+        }
 
         if (screenConfig instanceof FrameScreenConfig frameScreenConfig && frameScreenConfig.producesFrames()) {
             renderFrameScreen((FrameScreenService) screenService, frameScreenConfig, previewGeneration, screenIdx);
@@ -309,6 +340,79 @@ public class PanelScreenJob implements ReschedulableJob {
         }
     }
 
+    /** Builds the batch, or null (logged) when the command rendering fails — caller falls back. */
+    private byte[] buildCommandBatch(final CommandScreenService<ScreenConfig> screenService,
+                                     final ScreenConfig screenConfig) {
+        try {
+            return screenService.renderCommandBatch(screenConfig);
+        } catch (final Exception e) {
+            log.error("Command batch build failed for screen {} on panel {}; using the frame path",
+                    screenConfig.screenType(), panelConfig.getPanelId(), e);
+            return null;
+        }
+    }
+
+    /**
+     * ACMD v1 command path (plan §6): publishes one fully framed batch to
+     * {@code <serial>/cmd} — QoS 0, not retained, no ack (fire-and-forget) — and counts
+     * the slot from the send time. Command screens publish no retained base image;
+     * any retained frame left by an earlier static screen is cleared with an empty
+     * retained publish (live panels ignore zero-length base payloads; a panel booting
+     * mid-slot must not be served a stale screen). The SSE preview is driven from the
+     * {@link AcmdMirror} on the slot's virtual timeline — exactly what an ACMD panel
+     * renders, so preview parity comes for free.
+     */
+    private void renderCommandScreen(final byte[] batch, final ScreenConfig screenConfig,
+                                     final int previewGeneration) {
+        final String serial = px75Panel.getSerial();
+        final long slotNanos = Duration.ofSeconds(screenConfig.durationSeconds()).toNanos();
+        try {
+            mqttClient.publish(serial, new byte[0], 1, true);
+            final long sendNanos = System.nanoTime();
+            mqttClient.publish(serial + CMD_TOPIC, batch, 0, false);
+            log.info("------> Command batch ({} bytes) sent to panel {} for screen {}",
+                    batch.length, serial, screenConfig.screenType());
+
+            final AcmdMirror mirror = AcmdMirror.parse(batch);
+            final BufferedImage baseImage = AcmdMirror.toBufferedImage(mirror.frameAt(0));
+            final String imageFilename = "generated_images/" + serial + ".png";
+            ImageIO.write(baseImage, "PNG", new File(imageFilename));
+            scaleImageAndPublish(baseImage);
+            final long deadlineNanos = sendNanos + slotNanos;
+            Thread.startVirtualThread(() ->
+                    streamCommandPreview(previewGeneration, mirror, sendNanos, deadlineNanos));
+        } catch (IOException | MqttException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Streams the SSE preview of a command screen from the {@link AcmdMirror} at a fixed
+     * tick on the slot's virtual timeline (elapsed since the batch send), mirroring
+     * {@link #streamAnimationPreview}: stops early once superseded by a newer render
+     * (generation bump), when the slot ends, or when interrupted.
+     */
+    private void streamCommandPreview(final int generation, final AcmdMirror mirror,
+                                      final long sendNanos, final long deadlineNanos) {
+        while (running.get()
+                && generation == currentPreviewGeneration()
+                && System.nanoTime() < deadlineNanos) {
+            try {
+                final long elapsedMs = Math.max(0, (System.nanoTime() - sendNanos) / 1_000_000);
+                scaleImageAndPublish(AcmdMirror.toBufferedImage(mirror.frameAt(elapsedMs)));
+            } catch (IOException e) {
+                log.error("Failed to broadcast command preview frame for panel {}", panelConfig.getPanelId(), e);
+                return;
+            }
+            try {
+                Thread.sleep(COMMAND_PREVIEW_TICK_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
     /**
      * Uploads the next rotation screen's frame stream to the panel right away, while the current
      * screen is displaying (stage-only: the panel stores it in its slot file and waits for
@@ -329,6 +433,13 @@ public class PanelScreenJob implements ReschedulableJob {
         if (!(configs.get(nextIdx) instanceof FrameScreenConfig animConfig)
                 || !animConfig.producesFrames()
                 || !animConfig.stageAhead()) {
+            return 0;
+        }
+
+        // That boundary will render via ACMD commands instead: uploading the frame stream
+        // now would be dead weight (flash writes for a batch the panel never plays).
+        if (commandEncodingEnabled
+                && screenServices.get(animConfig.screenType()) instanceof CommandScreenService) {
             return 0;
         }
 
