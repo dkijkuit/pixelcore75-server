@@ -6,9 +6,10 @@ import java.util.List;
 
 /**
  * Deterministic uploadId for animation uploads: SHA-256 over exactly the content that makes
- * up an upload — frameCount (u32 LE), frameDelayMs (u16 LE), flags (u8, excluding the
- * stage-only bit — it is transport metadata, so staged and inline uploads of identical
- * content must hash identically or the acked-cache map would thrash between the two ids),
+ * up an upload — frameCount (u32 LE), frameDelayMs (u16 LE), flags (u8, masking out the
+ * stage-only bit and the codec bits, i.e. {@code & ~0x07} — both are transport metadata, so
+ * staged/inline and v2/RAW uploads of identical content must hash identically or the
+ * acked-cache map would thrash between ids and the RAW fallback could not reuse the id),
  * then every frame's raw RGB565 payload bytes in order (the ANIF bodies without their
  * magic/index header) —
  * truncated to the first 4 digest bytes (LE) so it fits the protocol's u32 uploadId field.
@@ -33,7 +34,7 @@ final class UploadIdHasher {
         header[3] = (byte) (frameCount >> 24);
         header[4] = (byte) frameDelayMs;
         header[5] = (byte) (frameDelayMs >> 8);
-        header[6] = (byte) (flags & ~PanelScreenJob.ANIM_FLAG_STAGE_ONLY);
+        header[6] = (byte) (flags & ~(PanelScreenJob.ANIM_FLAG_STAGE_ONLY | PanelScreenJob.ANIM_CODEC_MASK));
         digest.update(header);
         for (final byte[] payload : framePayloads) {
             digest.update(payload);

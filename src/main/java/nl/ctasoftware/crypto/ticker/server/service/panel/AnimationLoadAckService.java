@@ -42,12 +42,25 @@ public class AnimationLoadAckService {
      */
     static final int MAX_ACKED_SLOT_ENTRIES = 4096;
 
+    /**
+     * How long a panel stays on codec-0 RAW animation uploads after a v2 (PAL_RLE) upload
+     * went un-acked, before the server re-probes v2: old/mixed-fleet firmware silently drops
+     * length-mismatched v2 ANIFs, so the upload-ack timeout is the only signal — but a lost
+     * ack must not wedge a v2-capable panel on RAW forever, and a genuinely old panel should
+     * not be re-probed every cycle.
+     */
+    static final Duration V2_DOWNGRADE_WINDOW = Duration.ofHours(1);
+
+    /** Same crude bound as the acked-slot map, for the per-panel v2 downgrade deadlines. */
+    static final int MAX_DOWNGRADED_PANELS = 4096;
+
     private record PendingAck(long uploadId, CompletableFuture<Long> loadedAt) {}
 
     private record AckedSlot(String serial, int slot) {}
 
     private final Map<String, PendingAck> waiters = new ConcurrentHashMap<>();
     private final Map<AckedSlot, Long> ackedUploadIds = new ConcurrentHashMap<>();
+    private final Map<String, Long> v2DowngradeDeadlines = new ConcurrentHashMap<>();
 
     public AnimationLoadAckService(final IMqttClient mqttClient) throws MqttException {
         mqttClient.subscribe(ANIM_LOADED_TOPIC_FILTER, (topic, message) -> {
@@ -90,6 +103,27 @@ public class AnimationLoadAckService {
             ackedUploadIds.clear();
         }
         ackedUploadIds.put(new AckedSlot(serial, slot), uploadId);
+    }
+
+    /**
+     * Whether animation uploads to this panel should go out as codec-0 RAW right away (both
+     * the staged and the inline boundary path honor this). True until the panel's v2
+     * downgrade deadline passes; panels never seen downgrading re-probe v2 every upload.
+     */
+    public boolean prefersRaw(final String serial) {
+        final Long deadline = v2DowngradeDeadlines.get(serial);
+        return deadline != null && deadline - System.nanoTime() > 0;
+    }
+
+    public void markDowngraded(final String serial) {
+        markDowngraded(serial, V2_DOWNGRADE_WINDOW);
+    }
+
+    void markDowngraded(final String serial, final Duration window) {
+        if (v2DowngradeDeadlines.size() >= MAX_DOWNGRADED_PANELS) {
+            v2DowngradeDeadlines.clear();
+        }
+        v2DowngradeDeadlines.put(serial, System.nanoTime() + window.toNanos());
     }
 
     /**

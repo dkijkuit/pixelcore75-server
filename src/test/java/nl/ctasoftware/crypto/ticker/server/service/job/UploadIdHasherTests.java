@@ -42,9 +42,17 @@ class UploadIdHasherTests {
     }
 
     @Test
+    void codecBitsDoNotChangeHash() {
+        final long raw = UploadIdHasher.contentHash(2, 100, 0, TWO_FRAMES);
+        assertEquals(raw, UploadIdHasher.contentHash(2, 100, PanelScreenJob.ANIM_CODEC_PAL_RLE, TWO_FRAMES));
+        assertEquals(raw, UploadIdHasher.contentHash(2, 100,
+                PanelScreenJob.ANIM_FLAG_STAGE_ONLY | PanelScreenJob.ANIM_CODEC_PAL_RLE, TWO_FRAMES));
+    }
+
+    @Test
     void differsOnNonTransportFlagBits() {
         assertNotEquals(UploadIdHasher.contentHash(2, 100, 0, TWO_FRAMES),
-                UploadIdHasher.contentHash(2, 100, 0x02, TWO_FRAMES));
+                UploadIdHasher.contentHash(2, 100, 0x08, TWO_FRAMES));
     }
 
     @Test

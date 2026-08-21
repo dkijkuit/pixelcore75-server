@@ -94,4 +94,26 @@ class AnimationLoadAckServiceTests {
         final int last = AnimationLoadAckService.MAX_ACKED_SLOT_ENTRIES + 5;
         assertEquals(OptionalLong.of(1000L + last), ackService.ackedUploadId("PANEL-" + last, 0));
     }
+
+    @Test
+    void downgradeWindowMakesPanelPreferRawUntilItExpires() throws Exception {
+        assertFalse(ackService.prefersRaw(SERIAL), "never-downgraded panels get v2 uploads");
+        ackService.markDowngraded(SERIAL, Duration.ofMillis(20));
+        assertTrue(ackService.prefersRaw(SERIAL));
+        assertFalse(ackService.prefersRaw("OTHERPANEL"), "the downgrade is per-panel");
+
+        Thread.sleep(60);
+
+        assertFalse(ackService.prefersRaw(SERIAL), "after the window the server re-probes v2");
+    }
+
+    @Test
+    void downgradeMapOverflowClearsEarlierEntries() {
+        for (int i = 0; i <= AnimationLoadAckService.MAX_DOWNGRADED_PANELS + 5; i++) {
+            ackService.markDowngraded("PANEL-" + i, Duration.ofHours(1));
+        }
+
+        assertFalse(ackService.prefersRaw("PANEL-0"));
+        assertTrue(ackService.prefersRaw("PANEL-" + (AnimationLoadAckService.MAX_DOWNGRADED_PANELS + 5)));
+    }
 }

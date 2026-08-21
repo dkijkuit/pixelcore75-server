@@ -46,6 +46,9 @@ public class PanelScreenJob implements ReschedulableJob {
     static final String ANIM_FRAME_TOPIC = "/anim/frame";
     static final String ANIM_PLAY_TOPIC = "/anim/play";
     static final byte ANIM_FLAG_STAGE_ONLY = 0x01;
+    static final int ANIM_CODEC_MASK = 0x06;
+    static final int ANIM_CODEC_RAW = 0x00;
+    static final int ANIM_CODEC_PAL_RLE = 0x02;
 
     /**
      * Animation slots on the panel (must match firmware ANIM_MAX_SLOTS). Slot files double as a
@@ -256,11 +259,26 @@ public class PanelScreenJob implements ReschedulableJob {
                         log.warn("------> Play ack timeout for panel {} slot {}; re-uploading inline", serial, slot);
                     }
                     // Upload now; playback starts on the last frame.
+                    final int codecBits = codecBitsFor(serial);
                     animationLoadAckService.arm(serial, uploadId);
-                    final boolean uploadCompleted = sendAnimationToPanel(frameDelayMs, payloads, uploadId, false, slot);
+                    boolean uploadCompleted = sendAnimationToPanel(frameDelayMs, payloads, uploadId, false, slot, codecBits);
                     playbackStarted = uploadCompleted
                             && animationLoadAckService.awaitLoaded(serial, uploadId, uploadAckTimeout(frames.size()));
                     mode = "inline upload";
+                    if (!playbackStarted && codecBits == ANIM_CODEC_PAL_RLE) {
+                        // Old/mixed-fleet firmware silently drops length-mismatched v2 ANIFs,
+                        // so no ANIL ever comes: re-send the same content as codec-0 RAW under
+                        // the same uploadId (the content hash is codec-blind) and keep the
+                        // panel on RAW for the downgrade window.
+                        log.warn("------> No anim/loaded ack for panel {} slot {} on a v2 upload; re-sending as RAW",
+                                serial, slot);
+                        animationLoadAckService.markDowngraded(serial);
+                        animationLoadAckService.arm(serial, uploadId);
+                        uploadCompleted = sendAnimationToPanel(frameDelayMs, payloads, uploadId, false, slot, ANIM_CODEC_RAW);
+                        playbackStarted = uploadCompleted
+                                && animationLoadAckService.awaitLoaded(serial, uploadId, uploadAckTimeout(frames.size()));
+                        mode = "inline upload (raw fallback)";
+                    }
                 }
             }
 
@@ -345,10 +363,23 @@ public class PanelScreenJob implements ReschedulableJob {
                 return (System.nanoTime() - stageStartNanos) / 1_000_000;
             }
 
+            final int codecBits = codecBitsFor(serial);
             animationLoadAckService.arm(serial, uploadId);
-            final boolean uploadCompleted = sendAnimationToPanel(frameDelayMs, payloads, uploadId, true, nextSlot);
-            final boolean staged = uploadCompleted
+            boolean uploadCompleted = sendAnimationToPanel(frameDelayMs, payloads, uploadId, true, nextSlot, codecBits);
+            boolean staged = uploadCompleted
                     && animationLoadAckService.awaitLoaded(serial, uploadId, uploadAckTimeout(frames.size()));
+            if (!staged && codecBits == ANIM_CODEC_PAL_RLE) {
+                // Same old-firmware signal as the inline path: the v2 frames were silently
+                // dropped, so stage the same content as codec-0 RAW under the same uploadId
+                // and keep the panel on RAW for the downgrade window.
+                log.warn("------> No anim/loaded ack for panel {} slot {} on a v2 staged upload; re-sending as RAW",
+                        serial, nextSlot);
+                animationLoadAckService.markDowngraded(serial);
+                animationLoadAckService.arm(serial, uploadId);
+                uploadCompleted = sendAnimationToPanel(frameDelayMs, payloads, uploadId, true, nextSlot, ANIM_CODEC_RAW);
+                staged = uploadCompleted
+                        && animationLoadAckService.awaitLoaded(serial, uploadId, uploadAckTimeout(frames.size()));
+            }
             if (staged) {
                 stagedNextIdx = nextIdx;
                 stagedNextUploadId = uploadId;
@@ -443,33 +474,41 @@ public class PanelScreenJob implements ReschedulableJob {
                                          final List<byte[]> payloads,
                                          final long uploadId,
                                          final boolean stageOnly,
-                                         final int slot) throws MqttException {
+                                         final int slot,
+                                         final int codecBits) throws MqttException {
         final String serial = px75Panel.getSerial();
 
-        log.debug("------> Uploading animation ({} frames, {} ms delay, slot {}, stageOnly={}) to panel {}",
-                payloads.size(), frameDelayMs, slot, stageOnly, serial);
+        log.debug("------> Uploading animation ({} frames, {} ms delay, slot {}, stageOnly={}, codec={}) to panel {}",
+                payloads.size(), frameDelayMs, slot, stageOnly,
+                codecBits == ANIM_CODEC_PAL_RLE ? "PAL_RLE" : "RAW", serial);
 
+        final int flags = (stageOnly ? ANIM_FLAG_STAGE_ONLY : 0) | codecBits;
         mqttClient.publish(serial + ANIM_START_TOPIC,
-                animStartPayload(payloads.size(), (int) frameDelayMs, uploadId, stageOnly, slot), 1, false);
+                animStartPayload(payloads.size(), (int) frameDelayMs, uploadId, flags, slot), 1, false);
 
         // Full speed: the panel buffers frames in RAM and drains them to flash at its own
         // pace (MQTT flow control throttles this loop automatically), so no pacing needed.
         for (int i = 0; i < payloads.size(); i++) {
-            mqttClient.publish(serial + ANIM_FRAME_TOPIC, animFramePayload(i, payloads.get(i)), 1, false);
+            mqttClient.publish(serial + ANIM_FRAME_TOPIC, animFramePayload(i, payloads.get(i), codecBits), 1, false);
         }
 
         return true;
     }
 
+    /** Codec for this panel's next upload: RAW inside the v2 downgrade window, else PAL_RLE. */
+    private int codecBitsFor(final String serial) {
+        return animationLoadAckService.prefersRaw(serial) ? ANIM_CODEC_RAW : ANIM_CODEC_PAL_RLE;
+    }
+
     private static byte[] animStartPayload(final int frameCount, final int frameDelayMs,
-                                           final long uploadId, final boolean stageOnly, final int slot) {
+                                           final long uploadId, final int flags, final int slot) {
         return new byte[]{
                 'A', 'N', 'I', 'M',
                 (byte) frameCount, (byte) (frameCount >> 8),
                 (byte) frameDelayMs, (byte) (frameDelayMs >> 8),
                 (byte) uploadId, (byte) (uploadId >> 8),
                 (byte) (uploadId >> 16), (byte) (uploadId >> 24),
-                (byte) (stageOnly ? ANIM_FLAG_STAGE_ONLY : 0),
+                (byte) flags,
                 (byte) slot
         };
     }
@@ -483,15 +522,28 @@ public class PanelScreenJob implements ReschedulableJob {
         };
     }
 
-    private static byte[] animFramePayload(final int frameIdx, final byte[] rgb565) {
-        final byte[] payload = new byte[6 + rgb565.length];
+    private static byte[] animFramePayload(final int frameIdx, final byte[] rgb565, final int codecBits) {
+        if (codecBits == ANIM_CODEC_RAW) {
+            final byte[] payload = new byte[6 + rgb565.length];
+            payload[0] = 'A';
+            payload[1] = 'N';
+            payload[2] = 'I';
+            payload[3] = 'F';
+            payload[4] = (byte) frameIdx;
+            payload[5] = (byte) (frameIdx >> 8);
+            System.arraycopy(rgb565, 0, payload, 6, rgb565.length);
+            return payload;
+        }
+        final AnimationFrameCodec.EncodedFrame encoded = AnimationFrameCodec.encode(rgb565);
+        final byte[] payload = new byte[7 + encoded.body().length];
         payload[0] = 'A';
         payload[1] = 'N';
         payload[2] = 'I';
         payload[3] = 'F';
         payload[4] = (byte) frameIdx;
         payload[5] = (byte) (frameIdx >> 8);
-        System.arraycopy(rgb565, 0, payload, 6, rgb565.length);
+        payload[6] = (byte) encoded.frameFlags();
+        System.arraycopy(encoded.body(), 0, payload, 7, encoded.body().length);
         return payload;
     }
 
