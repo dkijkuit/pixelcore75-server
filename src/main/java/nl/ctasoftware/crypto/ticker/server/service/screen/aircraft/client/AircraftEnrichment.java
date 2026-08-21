@@ -2,13 +2,17 @@ package nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client;
 
 /**
  * Enrichment for the closest aircraft: registry details (owner/country/type) and its
- * flight route. Built via {@link #of} from the two adsbdb lookups.
+ * flight route. Built via {@link #of} from the two adsbdb lookups, with the registry
+ * gaps filled from the positional feed when adsbdb has no record for the airframe
+ * (a hex 404 — negatively cached — still leaves the feed's type/desc and the route's
+ * airline to show).
  */
 public record AircraftEnrichment(
         String owner,
         String ownerCountry,
         String manufacturer,
         String typeName,
+        String icaoType,
         String airlineName,
         String originCode,
         String originCity,
@@ -16,26 +20,45 @@ public record AircraftEnrichment(
         String destinationCity
 ) {
 
-    public static AircraftEnrichment of(final AdsbdbAircraftData details, final AdsbdbRouteData route) {
+    public static AircraftEnrichment of(final AdsbdbAircraftData details, final AdsbdbRouteData route,
+                                        final NearbyAircraft positional) {
         // adsbdb sometimes returns identical origin and destination for suffixed/positioning
         // callsigns (e.g. TAP31TY -> LGW>LGW): a data artifact, not a real route. Treat it
         // as unknown so the display skips the route instead of showing a nonsense leg.
         final AdsbdbRouteData effectiveRoute = isDegenerate(route) ? null : route;
+        final String airlineName = effectiveRoute != null && effectiveRoute.airline() != null
+                ? blankToNull(effectiveRoute.airline().name())
+                : null;
+        // Positional synthesis: adsbdb 404s for some airframes, but the readsb feed
+        // itself carries the ICAO type code and (on adsb.fi) the manufacturer+model
+        // string — registry misses still render a type line instead of nothing.
+        final String typeName = coalesce(orNull(details, AdsbdbAircraftData::type),
+                positional != null ? blankToNull(positional.typeDesc()) : null);
+        final String icaoType = coalesce(orNull(details, AdsbdbAircraftData::icaoType),
+                positional != null ? blankToNull(positional.type()) : null);
 
-        if (details == null && effectiveRoute == null) {
+        if (details == null && effectiveRoute == null && typeName == null && icaoType == null) {
             return null;
         }
         return new AircraftEnrichment(
-                orNull(details, AdsbdbAircraftData::registeredOwner),
+                // Owner falls back to the route's airline name: the ROUTE page's third
+                // line and the registry owner line then show who operates the flight
+                // even when the registry lookup missed.
+                coalesce(orNull(details, AdsbdbAircraftData::registeredOwner), airlineName),
                 orNull(details, AdsbdbAircraftData::registeredOwnerCountryName),
                 orNull(details, AdsbdbAircraftData::manufacturer),
-                orNull(details, AdsbdbAircraftData::type),
-                effectiveRoute != null && effectiveRoute.airline() != null ? blankToNull(effectiveRoute.airline().name()) : null,
+                typeName,
+                icaoType,
+                airlineName,
                 airportCode(effectiveRoute, true),
                 airportField(effectiveRoute, true, AdsbdbRouteData.Airport::municipality),
                 airportCode(effectiveRoute, false),
                 airportField(effectiveRoute, false, AdsbdbRouteData.Airport::municipality)
         );
+    }
+
+    private static String coalesce(final String first, final String second) {
+        return first != null ? first : second;
     }
 
     private static boolean isDegenerate(final AdsbdbRouteData route) {
@@ -56,7 +79,23 @@ public record AircraftEnrichment(
     }
 
     public boolean hasRegistry() {
-        return owner != null || ownerCountry != null || manufacturer != null || typeName != null;
+        return owner != null || ownerCountry != null || manufacturer != null || typeName != null
+                || icaoType != null;
+    }
+
+    /**
+     * Type string for a column at most {@code maxChars} wide: the full type name
+     * when it fits, else the ICAO type code ({@code "737NG 8AS/W"} → {@code "B738"}),
+     * else the full name for the caller to truncate. Null when nothing is known.
+     */
+    public String displayType(final int maxChars) {
+        if (typeName != null && typeName.length() <= maxChars) {
+            return typeName;
+        }
+        if (icaoType != null && icaoType.length() <= maxChars) {
+            return icaoType;
+        }
+        return typeName;
     }
 
     public boolean hasRoute() {

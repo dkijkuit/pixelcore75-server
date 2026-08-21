@@ -3,6 +3,7 @@ package nl.ctasoftware.crypto.ticker.server.service.screen;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenConfig;
 
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * A ScreenService whose screens can additionally render as an ACMD v1 command batch
@@ -35,7 +36,33 @@ public interface CommandScreenService<T extends ScreenConfig> extends ScreenServ
         return new BatchStream(List.of(renderCommandBatch(screenConfig)), 0);
     }
 
+    /**
+     * Live-refreshing command screens (e.g. RADAR's re-fetched blips): the fully
+     * rendered first batch plus a supplier for every following one, re-rendered with
+     * fresh data and republished by the job on the {@code refreshMs} grid until the
+     * slot ends. The cadence must make the batch's parametric loop whole (e.g. SWEEP
+     * at 180°/s with a 2000 ms refresh = exactly one revolution per interval): the
+     * panel re-arms the parametric at each commit, so a whole-loop cadence restarts
+     * it exactly where the previous one wrapped and the republish is invisible —
+     * and on carry-capable firmware an identical-SWEEP commit keeps the previous
+     * epoch outright (phase continuous regardless of arrival jitter). A
+     * {@code refreshMs} that is not a whole multiple of the parametric loop visibly
+     * snaps the animation back at every refresh. Null (the default) for screens
+     * whose data has no live value — they keep the {@link BatchStream} path.
+     */
+    default RefreshStream renderCommandRefresh(final T screenConfig) {
+        return null;
+    }
+
     /** Command batches in page order plus the dwell each is shown for (0 = single page). */
     record BatchStream(List<byte[]> batches, long pageDwellMs) {
+    }
+
+    /**
+     * Live-refreshing command stream: the first batch (rendered eagerly so a build
+     * failure falls back before the slot starts) and the supplier for each following
+     * refresh render.
+     */
+    record RefreshStream(byte[] firstBatch, Supplier<byte[]> nextBatches, long refreshMs) {
     }
 }

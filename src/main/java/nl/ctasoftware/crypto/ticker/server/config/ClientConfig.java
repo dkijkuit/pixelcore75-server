@@ -79,11 +79,27 @@ public class ClientConfig {
 
     @Bean
     RestClient adsbLolRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+        return aircraftApiRestClient("https://api.adsb.lol/v2/", noCacheRequestInterceptor);
+    }
+
+    /**
+     * Failover provider for live aircraft positions: readsb-style v2 API like adsb.lol
+     * (same aircraft fields, /mil endpoint), but the point query takes the
+     * {@code /lat/{lat}/lon/{lon}/dist/{dist}} path shape and the list key is
+     * {@code aircraft} instead of {@code ac} — the loader/wire DTOs absorb both
+     * differences (adsb.lol ingress rate-limits with 429s or drops nodes entirely).
+     */
+    @Bean
+    RestClient adsbFiRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+        return aircraftApiRestClient("https://opendata.adsb.fi/api/v2/", noCacheRequestInterceptor);
+    }
+
+    private static RestClient aircraftApiRestClient(final String baseUrl, final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
         return RestClient.builder()
                 .requestFactory(timedJdkRequestFactory())
                 .requestInterceptor(noCacheRequestInterceptor)
                 .defaultHeader(HttpHeaders.USER_AGENT, "pixelcore75")
-                .baseUrl("https://api.adsb.lol/v2/")
+                .baseUrl(baseUrl)
                 .build();
     }
 
@@ -98,9 +114,9 @@ public class ClientConfig {
     }
 
     /**
-     * adsb.lol resolves to several ingress nodes of which some are intermittently
+     * The ADS-B APIs resolve to several ingress nodes of which some are intermittently
      * unreachable (TLS reset / hang): keep connect/read timeouts tight so a render
-     * slot never blocks on a dead node; clients retry and degrade gracefully.
+     * slot never blocks on a dead node; clients rotate providers and degrade gracefully.
      */
     private static JdkClientHttpRequestFactory timedJdkRequestFactory() {
         final HttpClient httpClient = HttpClient.newBuilder()

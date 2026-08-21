@@ -213,6 +213,37 @@ class PanelScreenJobCommandTests {
         }
     }
 
+    /**
+     * A RADAR-style live screen: a fresh batch every render (the pixel's y encodes the
+     * render counter, so republished payloads prove re-rendered data) and a 300 ms
+     * refresh stream (one whole sweep loop per refresh, like the real radar's contract).
+     */
+    private static final class StubRefreshingService implements CommandScreenService<ScreenConfig> {
+        final AtomicInteger renders = new AtomicInteger();
+
+        @Override
+        public ScreenType getScreenType() {
+            return ScreenType.NEARBY_AIRCRAFT;
+        }
+
+        @Override
+        public Optional<BufferedImage> renderScreen(final ScreenConfig screenConfig) {
+            return Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+        }
+
+        @Override
+        public byte[] renderCommandBatch(final ScreenConfig screenConfig) {
+            return CommandBatch.builder().cls(0x0000)
+                    .pix(10, 10 + renders.incrementAndGet(), 0x07E0).build();
+        }
+
+        @Override
+        public RefreshStream renderCommandRefresh(final ScreenConfig screenConfig) {
+            return new RefreshStream(renderCommandBatch(screenConfig),
+                    () -> renderCommandBatch(screenConfig), 300);
+        }
+    }
+
     /* ------------------------------------------------------------------ */
 
     @Test
@@ -311,6 +342,34 @@ class PanelScreenJobCommandTests {
         Thread.sleep(1_500);
         assertEquals(2, pubs(p -> p.topic().equals(SERIAL + "/cmd")).size(),
                 "no publishes after the slot ends");
+    }
+
+    @Test
+    void flagOnRefreshesTheCommandBatchUntilTheSlotEnds() throws Exception {
+        newJob(true, new StubRefreshingService(), radarConfig()).run();
+
+        // 1 s slot on a 300 ms grid: the first batch plus refreshes at 300/600/900 ms.
+        final long deadline = System.currentTimeMillis() + 3_000;
+        while (pubs(p -> p.topic().equals(SERIAL + "/cmd")).size() < 3
+                && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        final List<Pub> cmdPubs = pubs(p -> p.topic().equals(SERIAL + "/cmd"));
+        assertTrue(cmdPubs.size() >= 3, "first batch + at least two on-grid refreshes, got " + cmdPubs.size());
+
+        for (int i = 1; i < cmdPubs.size(); i++) {
+            assertFalse(Arrays.equals(cmdPubs.get(i - 1).payload(), cmdPubs.get(i).payload()),
+                    "each refresh publishes a freshly rendered batch");
+            assertEquals(0, cmdPubs.get(i).qos(), "refreshes stay QoS 0");
+            assertFalse(cmdPubs.get(i).retained(), "refreshes are not retained");
+        }
+
+        // Past the slot deadline (1 s from the send) the refreshes must have stopped.
+        Thread.sleep(1_500);
+        final int settled = pubs(p -> p.topic().equals(SERIAL + "/cmd")).size();
+        Thread.sleep(600);
+        assertEquals(settled, pubs(p -> p.topic().equals(SERIAL + "/cmd")).size(),
+                "no refreshes after the slot ends");
     }
 
     /* ------------------------------------------------------------------ */

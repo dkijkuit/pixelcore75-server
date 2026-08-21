@@ -6,6 +6,7 @@ import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbLolAircraftClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbLolAircraftClient.AdsbLolRequest;
+import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbLolAircraftClient.AircraftApiProvider;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.NearbyAircraft;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.SoccerMatch;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -118,7 +119,11 @@ public class ClientCacheConfiguration {
      * {@link AdsbLolAircraftClient}, no Spring cache proxy): the first get() blocks for
      * the fetch-retry envelope; afterwards reads return the cached list instantly while
      * {@code refreshAfterWrite} re-fetches on the executor below — never the rendering
-     * thread. An entry disappears 60 s after its last write if untouched.
+     * thread. Loads rotate adsb.lol → adsb.fi (sticky on the provider that last
+     * answered). The 2 s window matches the radar command refresh cadence (blips move at
+     * every republish); fetches only happen while something actually polls that fast,
+     * so slower screens keep their once-per-slot fetch rate. An entry disappears 60 s
+     * after its last write if untouched.
      */
     @Bean(destroyMethod = "close")
     ExecutorService adsbLolRefreshExecutor() {
@@ -129,14 +134,18 @@ public class ClientCacheConfiguration {
     @Bean
     LoadingCache<AdsbLolRequest, List<NearbyAircraft>> adsbLolNearbyCache(
             @Qualifier("adsbLolRestClient") final RestClient adsbLolRestClient,
+            @Qualifier("adsbFiRestClient") final RestClient adsbFiRestClient,
             @Qualifier("adsbLolRefreshExecutor") final ExecutorService adsbLolRefreshExecutor) {
         return Caffeine.newBuilder()
                 .initialCapacity(1)
                 .maximumSize(50)
                 .expireAfterWrite(60, TimeUnit.SECONDS)
-                .refreshAfterWrite(10, TimeUnit.SECONDS)
+                .refreshAfterWrite(2, TimeUnit.SECONDS)
                 .executor(adsbLolRefreshExecutor)
-                .build(new AdsbLolAircraftClient.AdsbLolCacheLoader(adsbLolRestClient));
+                .build(new AdsbLolAircraftClient.AdsbLolCacheLoader(List.of(
+                        new AircraftApiProvider("adsb.lol", adsbLolRestClient),
+                        new AircraftApiProvider("adsb.fi", adsbFiRestClient,
+                                AircraftApiProvider.PointPathStyle.LAT_LON_DIST))));
     }
 
     /**

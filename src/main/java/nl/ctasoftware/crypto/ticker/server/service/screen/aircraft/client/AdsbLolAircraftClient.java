@@ -16,21 +16,57 @@ import java.util.List;
 import java.util.function.Function;
 
 /**
- * Live positions from api.adsb.lol, served through a stale-while-revalidate
- * {@link LoadingCache} (wired in {@code ClientCacheConfiguration}). The first
- * {@code get()} for an area blocks for the full retry envelope; afterwards reads
- * return the cached list instantly while {@code refreshAfterWrite} re-fetches on a
- * background virtual-thread executor, so a render slot never blocks on a dead
- * ingress node. Callers keep the old contract: total failure degrades to an empty
- * aircraft list instead of failing the screen slot.
+ * Live positions from readsb-style v2 APIs — api.adsb.lol primary, opendata.adsb.fi
+ * failover — served through a stale-while-revalidate {@link LoadingCache} (wired in
+ * {@code ClientCacheConfiguration}). Both providers speak the same JSON dialect, so a
+ * single loader rotates between them per retry attempt. The first {@code get()} for an
+ * area blocks for the full retry envelope; afterwards reads return the cached list
+ * instantly while {@code refreshAfterWrite} re-fetches on a background virtual-thread
+ * executor, so a render slot never blocks on a dead or rate-limited (429) ingress node.
+ * Callers keep the old contract: total failure degrades to an empty aircraft list
+ * instead of failing the screen slot.
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class AdsbLolAircraftClient implements AircraftClient {
 
-    /** Cache key: every input of the adsb.lol query (record equality). */
+    /** Cache key: every input of the aircraft query (record equality). */
     public record AdsbLolRequest(LatLon latLon, int radiusNm, boolean militaryOnly) {
+    }
+
+    /**
+     * One ADS-B API endpoint the loader rotates through, e.g. adsb.lol or adsb.fi. The
+     * readsb family shares field names but not the point-query path shape, so each
+     * provider carries its own {@link PointPathStyle}.
+     */
+    public record AircraftApiProvider(String name, RestClient restClient, PointPathStyle pointPathStyle) {
+
+        public AircraftApiProvider(final String name, final RestClient restClient) {
+            this(name, restClient, PointPathStyle.POINT);
+        }
+
+        /** Point-query path shapes of the readsb-style v2 APIs (radius/dist in nm). */
+        public enum PointPathStyle {
+            /** adsb.lol: {@code /point/{lat}/{lon}/{radius}}. */
+            POINT {
+                @Override
+                URI pointUri(final UriBuilder uriBuilder, final AdsbLolRequest request) {
+                    return uriBuilder.path("point/{lat}/{lon}/{radius}")
+                            .build(request.latLon().lat(), request.latLon().lon(), request.radiusNm());
+                }
+            },
+            /** adsb.fi: {@code /lat/{lat}/lon/{lon}/dist/{dist}}. */
+            LAT_LON_DIST {
+                @Override
+                URI pointUri(final UriBuilder uriBuilder, final AdsbLolRequest request) {
+                    return uriBuilder.path("lat/{lat}/lon/{lon}/dist/{dist}")
+                            .build(request.latLon().lat(), request.latLon().lon(), request.radiusNm());
+                }
+            };
+
+            abstract URI pointUri(UriBuilder uriBuilder, AdsbLolRequest request);
+        }
     }
 
     final LoadingCache<AdsbLolRequest, List<NearbyAircraft>> adsbLolNearbyCache;
@@ -62,18 +98,22 @@ public class AdsbLolAircraftClient implements AircraftClient {
         private static final int MAX_ATTEMPTS = 3;
         private static final long RETRY_BACKOFF_MS = 500;
 
-        private final RestClient adsbLolRestClient;
+        private final List<AircraftApiProvider> providers;
 
-        public AdsbLolCacheLoader(final RestClient adsbLolRestClient) {
-            this.adsbLolRestClient = adsbLolRestClient;
+        /** Index of the provider that last answered; loads start there (rate-limited or
+         * dead primaries stop being tried first once the failover has proven itself). */
+        private volatile int lastGoodIndex = 0;
+
+        public AdsbLolCacheLoader(final List<AircraftApiProvider> providers) {
+            if (providers == null || providers.isEmpty()) {
+                throw new IllegalArgumentException("at least one aircraft API provider is required");
+            }
+            this.providers = List.copyOf(providers);
         }
 
         @Override
         public List<NearbyAircraft> load(final AdsbLolRequest request) {
-            final AdsbLolResponse response = request.militaryOnly()
-                    ? fetchWithRetry(uriBuilder -> uriBuilder.path("mil").build())
-                    : fetchWithRetry(uriBuilder -> uriBuilder.path("point/{lat}/{lon}/{radius}")
-                            .build(request.latLon().lat(), request.latLon().lon(), request.radiusNm()));
+            final AdsbLolResponse response = fetchWithRetry(request);
 
             if (response == null || response.ac() == null) {
                 return List.of();
@@ -88,22 +128,31 @@ public class AdsbLolAircraftClient implements AircraftClient {
         }
 
         /**
-         * Retries transient transport failures (dns round-robin regularly hands out an ingress
-         * node that resets the TLS handshake or hangs). Returns null after the last attempt so
-         * the load degrades to an empty aircraft list instead of failing the screen slot.
+         * Retries transient failures, rotating through the providers attempt by attempt
+         * (dns round-robin regularly hands out an ingress node that resets the TLS
+         * handshake or hangs, and the limiter answers 429). The provider that last
+         * answered is tried first, so a persistently rate-limited primary costs at most
+         * one failed request before the failover takes over. Returns null after the last
+         * attempt so the load degrades to an empty aircraft list instead of failing the
+         * screen slot.
          */
-        private AdsbLolResponse fetchWithRetry(final Function<UriBuilder, URI> uriFunction) {
+        private AdsbLolResponse fetchWithRetry(final AdsbLolRequest request) {
             for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+                final int index = (lastGoodIndex + attempt - 1) % providers.size();
+                final AircraftApiProvider provider = providers.get(index);
                 try {
-                    return fetch(uriFunction);
+                    final AdsbLolResponse response = fetch(provider, request);
+                    lastGoodIndex = index;
+                    return response;
                 } catch (final RuntimeException e) {
-                    log.warn("adsb.lol fetch attempt {}/{} failed: {}", attempt, MAX_ATTEMPTS, rootMessage(e));
+                    log.warn("{} aircraft fetch attempt {}/{} failed: {}", provider.name(), attempt, MAX_ATTEMPTS, rootMessage(e));
                     if (attempt < MAX_ATTEMPTS && !sleep(RETRY_BACKOFF_MS * attempt)) {
                         return null;
                     }
                 }
             }
-            log.error("adsb.lol unreachable after {} attempts; rendering no aircraft", MAX_ATTEMPTS);
+            log.error("aircraft providers {} all unreachable after {} attempts; rendering no aircraft",
+                    providers.stream().map(AircraftApiProvider::name).toList(), MAX_ATTEMPTS);
             return null;
         }
 
@@ -117,8 +166,11 @@ public class AdsbLolAircraftClient implements AircraftClient {
             }
         }
 
-        private AdsbLolResponse fetch(final Function<UriBuilder, URI> uriFunction) {
-            return adsbLolRestClient.get()
+        private AdsbLolResponse fetch(final AircraftApiProvider provider, final AdsbLolRequest request) {
+            final Function<UriBuilder, URI> uriFunction = request.militaryOnly()
+                    ? uriBuilder -> uriBuilder.path("mil").build()
+                    : uriBuilder -> provider.pointPathStyle().pointUri(uriBuilder, request);
+            return provider.restClient().get()
                     .uri(uriFunction)
                     .accept(MediaType.APPLICATION_JSON)
                     .retrieve()
@@ -134,6 +186,7 @@ public class AdsbLolAircraftClient implements AircraftClient {
                     callsign,
                     blankToNull(ac.r()),
                     blankToNull(ac.t()),
+                    blankToNull(ac.desc()),
                     ac.altitudeFt(),
                     ac.onGround(),
                     ac.gs(),

@@ -39,6 +39,7 @@ import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -53,7 +54,7 @@ public class PanelScreenJob implements ReschedulableJob {
     static final int ANIM_CODEC_RAW = 0x00;
     static final int ANIM_CODEC_PAL_RLE = 0x02;
 
-    /** SSE preview tick for command screens (ms): smooth for a 90°/s sweep, cheap otherwise. */
+    /** SSE preview tick for command screens (ms): smooth for the radar sweep speeds, cheap otherwise. */
     static final long COMMAND_PREVIEW_TICK_MS = 100;
 
     /**
@@ -205,12 +206,19 @@ public class PanelScreenJob implements ReschedulableJob {
 
         // ACMD command path (plan §6): flag ON + the service implements it → publish the
         // first batch to <serial>/cmd (multi-page screens cycle their further batches at
-        // each page dwell). Batch build failures fall back to the screen's regular path
-        // (the flag is a fleet-wide toggle, a single screen must not break a slot).
+        // each page dwell; live screens refresh theirs on the refresh grid). Batch build
+        // failures fall back to the screen's regular path (the flag is a fleet-wide
+        // toggle, a single screen must not break a slot).
         if (commandEncodingEnabled && screenService instanceof CommandScreenService) {
             @SuppressWarnings("unchecked")
             final CommandScreenService<ScreenConfig> commandScreenService =
                     (CommandScreenService<ScreenConfig>) screenService;
+            final CommandScreenService.RefreshStream refresh =
+                    buildCommandRefresh(commandScreenService, screenConfig);
+            if (refresh != null) {
+                renderRefreshingCommandScreen(refresh, screenConfig, previewGeneration);
+                return;
+            }
             final CommandScreenService.BatchStream stream =
                     buildCommandBatches(commandScreenService, screenConfig);
             if (stream != null) {
@@ -351,6 +359,154 @@ public class PanelScreenJob implements ReschedulableJob {
             log.error("Command batch build failed for screen {} on panel {}; using the frame path",
                     screenConfig.screenType(), panelConfig.getPanelId(), e);
             return null;
+        }
+    }
+
+    /**
+     * Builds the live-refresh stream (whose eager first render validates it), or null
+     * when the screen offers no refresh or that first render fails — caller continues
+     * with the page batches, then the frame path, exactly like a batch build failure.
+     */
+    private CommandScreenService.RefreshStream buildCommandRefresh(
+            final CommandScreenService<ScreenConfig> screenService, final ScreenConfig screenConfig) {
+        try {
+            final CommandScreenService.RefreshStream refresh =
+                    screenService.renderCommandRefresh(screenConfig);
+            return refresh != null && refresh.refreshMs() > 0 ? refresh : null;
+        } catch (final Exception e) {
+            log.error("Command refresh build failed for screen {} on panel {}; using the batch path",
+                    screenConfig.screenType(), panelConfig.getPanelId(), e);
+            return null;
+        }
+    }
+
+    /**
+     * Live-refreshing command screens: like {@link #renderCommandScreen} (retained
+     * base cleared, QoS-0 fire-and-forget batch, slot counted from the send, SSE
+     * preview from the {@link AcmdMirror}), but two virtual threads run the slot:
+     * {@link #refreshCommandBatches} re-renders and republishes on the refresh grid,
+     * and {@link #streamRefreshingCommandPreview} samples whatever mirror is current
+     * on the slot-anchored timeline (each refresh interval is a whole parametric
+     * loop by contract, so the sweep phase stays continuous across swaps).
+     */
+    private void renderRefreshingCommandScreen(final CommandScreenService.RefreshStream refresh,
+                                               final ScreenConfig screenConfig, final int previewGeneration) {
+        final String serial = px75Panel.getSerial();
+        final long slotNanos = Duration.ofSeconds(screenConfig.durationSeconds()).toNanos();
+        try {
+            mqttClient.publish(serial, new byte[0], 1, true);
+            final byte[] firstBatch = refresh.firstBatch();
+            final long sendNanos = System.nanoTime();
+            publishCommandBatch(previewGeneration, firstBatch);
+            log.info("------> Command batch ({} bytes, refreshing every {} ms) sent to panel {} for screen {}",
+                    firstBatch.length, refresh.refreshMs(), serial, screenConfig.screenType());
+
+            final AtomicReference<AcmdMirror> mirrorRef = new AtomicReference<>(AcmdMirror.parse(firstBatch));
+
+            final BufferedImage baseImage = AcmdMirror.toBufferedImage(mirrorRef.get().frameAt(0));
+            final String imageFilename = "generated_images/" + serial + ".png";
+            ImageIO.write(baseImage, "PNG", new File(imageFilename));
+            scaleImageAndPublish(baseImage);
+            final long deadlineNanos = sendNanos + slotNanos;
+            Thread.startVirtualThread(() ->
+                    streamRefreshingCommandPreview(previewGeneration, mirrorRef, sendNanos, deadlineNanos));
+            Thread.startVirtualThread(() ->
+                    refreshCommandBatches(previewGeneration, refresh, mirrorRef, sendNanos, deadlineNanos));
+        } catch (IOException | MqttException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Refresh publisher: renders each next batch during the interval before its grid
+     * point (pipelined, so publishes land exactly one refresh apart regardless of a
+     * slow fetch) and republishes at every {@code refreshMs} boundary of the slot.
+     * A slow or failed render skips grid points instead of publishing late — any
+     * whole multiple of the refresh interval still ends the previous parametric
+     * exactly where the new one re-arms (seamless by the {@code RefreshStream}
+     * contract), while a late publish would visibly snap the sweep back. Stops like
+     * the other slot threads: superseded by a newer render, slot end, interruption.
+     */
+    private void refreshCommandBatches(final int generation, final CommandScreenService.RefreshStream refresh,
+                                       final AtomicReference<AcmdMirror> mirrorRef,
+                                       final long sendNanos, final long deadlineNanos) {
+        final long refreshNanos = refresh.refreshMs() * 1_000_000L;
+        long nextPublishNanos = sendNanos + refreshNanos;
+        while (running.get()
+                && !Thread.currentThread().isInterrupted()
+                && generation == currentPreviewGeneration()
+                && System.nanoTime() < deadlineNanos) {
+            byte[] nextBatch = null;
+            try {
+                nextBatch = refresh.nextBatches().get();
+            } catch (final Exception e) {
+                log.error("Command refresh render failed for panel {}; keeping the last batch on display",
+                        panelConfig.getPanelId(), e);
+            }
+            sleepUntil(nextPublishNanos);
+            // Advance the grid past everything the render consumed: a publish that
+            // cannot land on time is dropped to the next grid point, never late.
+            do {
+                nextPublishNanos += refreshNanos;
+            } while (nextPublishNanos <= System.nanoTime());
+
+            if (!running.get() || Thread.currentThread().isInterrupted()
+                    || generation != currentPreviewGeneration()
+                    || System.nanoTime() >= deadlineNanos) {
+                return;
+            }
+            if (nextBatch == null) {
+                continue; // render failed this interval; the panel keeps the previous batch
+            }
+            try {
+                final AcmdMirror mirror = AcmdMirror.parse(nextBatch);
+                publishCommandBatch(generation, nextBatch);
+                mirrorRef.set(mirror);
+                log.debug("------> Command refresh ({} bytes) sent to panel {}", nextBatch.length,
+                        px75Panel.getSerial());
+            } catch (final MqttException e) {
+                log.error("Failed to publish command refresh for panel {}", panelConfig.getPanelId(), e);
+                return;
+            }
+        }
+    }
+
+    /**
+     * Refreshing variant of {@link #streamCommandPreview}: samples the latest mirror
+     * (swapped at each refresh publish) but keeps the slot-anchored timeline — each
+     * refresh interval is a whole parametric loop by contract, so the sweep phase is
+     * continuous across swaps and the elapsed time never resets.
+     */
+    private void streamRefreshingCommandPreview(final int generation, final AtomicReference<AcmdMirror> mirrorRef,
+                                                final long sendNanos, final long deadlineNanos) {
+        while (running.get()
+                && generation == currentPreviewGeneration()
+                && System.nanoTime() < deadlineNanos) {
+            try {
+                final long elapsedMs = Math.max(0, (System.nanoTime() - sendNanos) / 1_000_000);
+                scaleImageAndPublish(AcmdMirror.toBufferedImage(mirrorRef.get().frameAt(elapsedMs)));
+            } catch (IOException e) {
+                log.error("Failed to broadcast command preview frame for panel {}", panelConfig.getPanelId(), e);
+                return;
+            }
+            try {
+                Thread.sleep(COMMAND_PREVIEW_TICK_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    /** Sleeps until {@code targetNanos} (one coarse ms-granularity sleep; loop conditions re-checked after). */
+    private static void sleepUntil(final long targetNanos) {
+        final long millis = (targetNanos - System.nanoTime()) / 1_000_000;
+        if (millis > 0) {
+            try {
+                Thread.sleep(millis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

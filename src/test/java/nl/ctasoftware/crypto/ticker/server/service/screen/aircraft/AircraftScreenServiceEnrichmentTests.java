@@ -9,6 +9,7 @@ import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService.Fra
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbAircraftData;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbRouteData;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AircraftClient;
+import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AircraftEnrichment;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AircraftInfoClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.NearbyAircraft;
 import nl.ctasoftware.crypto.ticker.server.service.screen.weather.LatLon;
@@ -23,9 +24,12 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -77,14 +81,15 @@ class AircraftScreenServiceEnrichmentTests {
     }
 
     @Test
-    void failingDetailsLegDegradesToRouteOnlyPage() {
+    void failingDetailsLegFallsBackToThePositionalFeedType() {
         givenAircraft();
         when(infoClient.getAircraftDetails(HEX)).thenThrow(new RuntimeException("adsbdb down"));
         when(infoClient.getRoute(CALLSIGN)).thenReturn(Optional.of(route()));
 
         final FrameStream stream = assertDoesNotThrow(() -> service.renderFrameStream(config()));
 
-        assertEquals(2, stream.frames().size()); // identity + route
+        // identity + registry (type synthesized from the positional feed's "A319") + route
+        assertEquals(3, stream.frames().size());
         verify(infoClient).getRoute(CALLSIGN);
     }
 
@@ -101,19 +106,82 @@ class AircraftScreenServiceEnrichmentTests {
     }
 
     @Test
-    void bothLegsEmptyYieldIdentityPageOnly() {
+    void bothLegsEmptyStillShowTheFeedTypeRegistryPage() {
         givenAircraft();
         when(infoClient.getAircraftDetails(HEX)).thenReturn(Optional.empty());
         when(infoClient.getRoute(CALLSIGN)).thenReturn(Optional.empty());
 
         final FrameStream stream = service.renderFrameStream(config());
 
-        assertEquals(2, stream.frames().size()); // single page duplicated to the 2-frame protocol minimum
+        // adsbdb knows nothing, but the feed's type code still yields a registry page
+        assertEquals(2, stream.frames().size()); // identity + registry (no route to show)
+        // PaintTools is mocked (blank images), so assert on the drawn registry type
+        // line instead of pixels: y=27 is registryPage's type row, and the identity
+        // page's own type line is "A319 G-TEST" — only the registry line is bare "A319".
+        verify(paintTools).drawText(any(), any(), eq("A319"), eq(0), eq(27), any());
+    }
+
+    @Test
+    void displayTypePrefersTheFullNameWhenItFitsElseTheIcaoCode() {
+        final AircraftEnrichment ryr = AircraftEnrichment.of(
+                new AdsbdbAircraftData("737NG 8AS/W", "B738", "Boeing", HEX, "EI-DPV",
+                        "Ireland", "Ryanair"), null, null);
+
+        assertEquals("737NG 8AS/W", ryr.displayType(12)); // full name fits the CLOSEST column
+        assertEquals("B738", ryr.displayType(6));         // radar column: ICAO code instead of "737NG "
+    }
+
+    @Test
+    void displayTypeFallsBackToTheFullNameForTruncationWhenNothingFits() {
+        final AircraftEnrichment falcon = AircraftEnrichment.of(
+                new AdsbdbAircraftData("Falcon 2000EX", "F2TH", "Dassault", HEX, null, null, null),
+                null, null);
+
+        assertEquals("Falcon 2000EX", falcon.displayType(3)); // caller truncates
+    }
+
+    @Test
+    void displayTypeIsNullWhenNothingIsKnown() {
+        assertNull(AircraftEnrichment.of(
+                new AdsbdbAircraftData(null, null, null, HEX, null, null, null), null, null).displayType(6));
+    }
+
+    @Test
+    void detailsMissBuildsRegistryFromThePositionalFeedAndTheAirline() {
+        // RYR93TP shape: adsbdb 404s the hex, but the feed carries type/desc and the
+        // route leg resolves the airline.
+        final AircraftEnrichment synthesized = AircraftEnrichment.of(null,
+                new AdsbdbRouteData("RYR93TP",
+                        new AdsbdbRouteData.Airline("Ryanair", "RYR", "FR", "Ireland"),
+                        airport("FAO", "Faro"), airport("LBA", "Leeds")),
+                new NearbyAircraft("4CAF2B", "RYR93TP", "EI-ILR", "B38M", "BOEING 737 MAX 8",
+                        38_000, false, 466.0, 25.0, 0, 100.0, 180.0));
+
+        assertEquals("Ryanair", synthesized.owner());          // airline-name fallback
+        assertEquals("BOEING 737 MAX 8", synthesized.typeName()); // feed desc
+        assertEquals("B38M", synthesized.icaoType());            // feed type code
+        assertEquals("B38M", synthesized.displayType(6));        // radar column
+        assertTrue(synthesized.hasRegistry());
+        assertTrue(synthesized.hasRoute());
+    }
+
+    @Test
+    void synthesisFillsOnlyTheMissingDetailsFields() {
+        final AircraftEnrichment merged = AircraftEnrichment.of(
+                new AdsbdbAircraftData(null, null, "Boeing", HEX, "EI-DPV", "Ireland", "Ryanair"),
+                null,
+                new NearbyAircraft(HEX, CALLSIGN, "EI-DPV", "B38M", "BOEING 737 MAX 8",
+                        38_000, false, 466.0, 25.0, 0, 100.0, 180.0));
+
+        assertEquals("Ryanair", merged.owner());                 // details win over airline
+        assertEquals("BOEING 737 MAX 8", merged.typeName());     // positional fills the gap
+        assertEquals("B38M", merged.icaoType());
+        assertEquals("Boeing", merged.manufacturer());           // details field kept
     }
 
     private void givenAircraft() {
         when(aircraftClient.getAircraft(any(), anyInt(), anyBoolean()))
-                .thenReturn(List.of(new NearbyAircraft(HEX, CALLSIGN, "G-TEST", "A319",
+                .thenReturn(List.of(new NearbyAircraft(HEX, CALLSIGN, "G-TEST", "A319", null,
                         35_000, false, 450.0, 90.0, 0, 12.5, 45.0)));
     }
 
