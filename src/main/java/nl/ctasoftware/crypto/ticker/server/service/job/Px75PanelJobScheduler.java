@@ -10,6 +10,7 @@ import nl.ctasoftware.crypto.ticker.server.service.panel.AnimationLoadAckService
 import nl.ctasoftware.crypto.ticker.server.service.panel.Px75PanelConfigService;
 import nl.ctasoftware.crypto.ticker.server.service.panel.Px75PanelService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.ScreenService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.custom.CustomScreenLibraryService;
 import org.eclipse.paho.client.mqttv3.IMqttClient;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -41,6 +42,7 @@ public class Px75PanelJobScheduler implements PanelJobScheduler {
     final ImageBroadcasterService imageBroadcasterService;
     final AnimationLoadAckService animationLoadAckService;
     final JobSchedulerService jobSchedulerService;
+    final CustomScreenLibraryService customScreenLibraryService;
     final Duration stepDelay = Duration.ofMillis(250);
     final AtomicInteger index = new AtomicInteger(0);
 
@@ -62,6 +64,7 @@ public class Px75PanelJobScheduler implements PanelJobScheduler {
                                  final ImageBroadcasterService imageBroadcasterService,
                                  final AnimationLoadAckService animationLoadAckService,
                                  final JobSchedulerService jobSchedulerService,
+                                 final CustomScreenLibraryService customScreenLibraryService,
                                  @Value("${pixelcore75.command-encoding.enabled:false}") final boolean commandEncodingEnabled) {
         this.px75PanelConfigService = px75PanelConfigService;
         this.px75PanelService = px75PanelService;
@@ -71,6 +74,7 @@ public class Px75PanelJobScheduler implements PanelJobScheduler {
         this.imageBroadcasterService = imageBroadcasterService;
         this.animationLoadAckService = animationLoadAckService;
         this.jobSchedulerService = jobSchedulerService;
+        this.customScreenLibraryService = customScreenLibraryService;
         this.commandEncodingEnabled = commandEncodingEnabled;
     }
 
@@ -85,7 +89,7 @@ public class Px75PanelJobScheduler implements PanelJobScheduler {
 
         log.info("Scheduling PanelScreenJob for user {} for panel {}", userId, panelId);
 
-        final PanelScreenJob panelScreenJob = new PanelScreenJob(px75PanelForUser, panelConfig, screenServices, imageService, mqttClient, imageBroadcasterService, animationLoadAckService, previewGenerations, commandEncodingEnabled);
+        final PanelScreenJob panelScreenJob = new PanelScreenJob(px75PanelForUser, panelConfig, screenServices, imageService, mqttClient, imageBroadcasterService, animationLoadAckService, previewGenerations, commandEncodingEnabled, customScreenLibraryService);
         jobSchedulerService.schedule(panelScreenJob, Duration.ZERO);
     }
 
@@ -103,7 +107,7 @@ public class Px75PanelJobScheduler implements PanelJobScheduler {
             int i = index.getAndIncrement();
             log.info("--> Starting panel job for panelId: {}", px75Panel.getPanelId());
             final Px75PanelConfig panelConfig = px75PanelConfigService.getPanelConfig(px75Panel.getPanelId());
-            final PanelScreenJob panelScreenJob = new PanelScreenJob(px75Panel, panelConfig, screenServices, imageService, mqttClient, imageBroadcasterService, animationLoadAckService, previewGenerations, commandEncodingEnabled);
+            final PanelScreenJob panelScreenJob = new PanelScreenJob(px75Panel, panelConfig, screenServices, imageService, mqttClient, imageBroadcasterService, animationLoadAckService, previewGenerations, commandEncodingEnabled, customScreenLibraryService);
 
             Duration delay = stepDelay.multipliedBy(i);
             jobSchedulerService.schedule(panelScreenJob, delay);

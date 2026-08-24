@@ -38,6 +38,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -53,7 +55,9 @@ import static org.mockito.Mockito.when;
  * advances, so pen positions agree exactly). The budget guards JDK font-rendering
  * variance, and fixtures use strings that fit, so the TEXT branch renders exactly the
  * frame path's untruncated strings.</li>
- * <li>RADAR: budget 160 px (7.8%; measured &le;96). Three documented ACMD v1 semantics
+ * <li>RADAR: budget 160 px (7.8%; measured &le;96, 74/65 with the tracked aircraft's
+ * white blip + velocity vector drawn by both engines — the AWT-vs-GFX line rasterization variance
+ * it adds is the same class as the sweep trail's). Three documented ACMD v1 semantics
  * differ from the frame path on purpose: the frame path draws a 6-segment sweep trail
  * (5 extra lines, ~65 px) while SWEEP is a single line; the frame path's rings are AWT
  * drawOval rasterizations (half-pixel-centered boxes) while CIRC is the GFX midpoint
@@ -84,6 +88,7 @@ class AircraftCommandParityTests {
     void setUp() {
         final Font ledBoard = FontPageExtractor.loadFont(new File("assets/fonts/EXEPixelPerfect.ttf"), 16f);
         final Font cgPixel = FontPageExtractor.loadFont(new File("assets/fonts/cg-pixel-4x5.ttf"), 5f);
+        when(aircraftClient.getAircraftFresh(any(), anyInt(), anyBoolean())).thenReturn(FIXTURE);
         when(aircraftClient.getAircraft(any(), anyInt(), anyBoolean())).thenReturn(FIXTURE);
         when(infoClient.getAircraftDetails(any())).thenReturn(Optional.empty());
         when(infoClient.getRoute(any())).thenReturn(Optional.empty());
@@ -140,7 +145,7 @@ class AircraftCommandParityTests {
         final AircraftScreenConfig config = config(AircraftDisplayMode.CLOSEST);
         // Feed synthesis turns a feed type code into a registry page, so "no
         // enrichment at all" needs a type-less feed aircraft too.
-        when(aircraftClient.getAircraft(any(), anyInt(), anyBoolean())).thenReturn(List.of(
+        when(aircraftClient.getAircraftFresh(any(), anyInt(), anyBoolean())).thenReturn(List.of(
                 new NearbyAircraft("484507", "KLM123", "PH-EXM", null, null,
                         8_000, false, 350.0, 90.0, 0, 12.3, 60.0)));
 
@@ -180,7 +185,7 @@ class AircraftCommandParityTests {
                 .map(AcmdCommand.Text.class::cast)
                 .map(AcmdCommand.Text::ascii)
                 .toList();
-        assertTrue(texts.contains("GRU>BOG"), () -> texts.toString());
+        assertTrue(texts.contains("GRU -> BOG"), () -> texts.toString());
         assertTrue(texts.contains("Sao Paulo"), () -> texts.toString());
         assertTrue(texts.contains("Bogota"), () -> texts.toString());
         assertTrue(texts.stream().noneMatch(t -> t.chars().anyMatch(c -> c < 32 || c > 126)),
@@ -266,29 +271,30 @@ class AircraftCommandParityTests {
 
         // Enrichment resolves both legs → telemetry + route + registry pages spread
         // evenly over the loop: frames from different page windows differ (the info
-        // column), while the white selection box sits on the same closest blip in
-        // every page (the only pure-white pixels in the scope half; the sweep line
-        // may transiently overdraw a corner as it passes — both engines draw it over
-        // the base — so up to 2 of the 12 box pixels can be missing in a given frame).
+        // column), while the white tracked marker (blip + vector) sits on the same
+        // closest aircraft in every page (the only pure-white pixels in the scope
+        // half; the sweep line may transiently overdraw part of it as it passes —
+        // both engines draw it over the base — so up to 2 of the 7 marker pixels
+        // can be missing in a given frame).
         assertTrue(FrameParity.mismatchedPixels(
                         FrameParity.rgb565(goldenFrames.get(frameCount / 6)),
                         FrameParity.rgb565(goldenFrames.get(frameCount / 2))) > 0,
                 "the info column cycles detail pages");
-        // FIXTURE[0] projects to (19,14) → the 4×4 box outline at (17,12)..(20,15).
-        final var expectedBox = new java.util.HashSet<Long>();
-        for (int x = 17; x <= 20; x++) {
-            expectedBox.add(12L << 8 | x);
-            expectedBox.add(15L << 8 | x);
+        // FIXTURE[0] projects to (19,14) → the white 2×2 blip at (18,13)..(19,14)
+        // plus the eastward velocity vector to (22,14).
+        final var expectedWhites = new java.util.HashSet<Long>();
+        for (int x = 18; x <= 19; x++) {
+            expectedWhites.add(13L << 8 | x);
+            expectedWhites.add(14L << 8 | x);
         }
-        for (int y = 12; y <= 15; y++) {
-            expectedBox.add((long) y << 8 | 17);
-            expectedBox.add((long) y << 8 | 20);
+        for (int x = 20; x <= 22; x++) {
+            expectedWhites.add(14L << 8 | x);
         }
         for (final int frameIdx : new int[]{frameCount / 6, frameCount / 2}) {
-            final var whites = whiteBoxInScope(goldenFrames.get(frameIdx));
-            assertTrue(expectedBox.containsAll(whites), "frame " + frameIdx + ": whites outside the box");
-            assertTrue(whites.size() >= expectedBox.size() - 2,
-                    "frame " + frameIdx + ": the box is on the closest blip");
+            final var whites = whitesInScope(goldenFrames.get(frameIdx));
+            assertTrue(expectedWhites.containsAll(whites), "frame " + frameIdx + ": whites outside the tracked marker");
+            assertTrue(whites.size() >= expectedWhites.size() - 2,
+                    "frame " + frameIdx + ": the white tracked marker is on the closest aircraft");
         }
 
         // The command-path page rotation slices the slot into equal page windows
@@ -302,10 +308,11 @@ class AircraftCommandParityTests {
 
     /**
      * Positions of the pure-white pixels in the scope half (x &lt; 32) of a radar frame:
-     * the selection box is the only white thing there (rings/sweep/blips are green
-     * shades or altitude colors), so the set identifies where the box sits.
+     * the tracked marker (white blip + vector) is the only white thing there
+     * (rings/sweep/blips are green shades or altitude colors), so the set identifies
+     * where it sits.
      */
-    private static java.util.Set<Long> whiteBoxInScope(final BufferedImage frame) {
+    private static java.util.Set<Long> whitesInScope(final BufferedImage frame) {
         final int[] rgb565 = FrameParity.rgb565(frame);
         final var whites = new java.util.HashSet<Long>();
         for (int y = 0; y < 32; y++) {
@@ -322,6 +329,11 @@ class AircraftCommandParityTests {
     void radarOffersALiveRefreshStreamOthersDoNot() {
         // Type-less feed aircraft: with a feed type code the column gains a synthesized
         // registry page (2 pages → adapted cadence); this keeps the single-page branch.
+        // The eager first batch renders via the fresh read, the refresh supplier via
+        // the SWR read — both stubbed.
+        when(aircraftClient.getAircraftFresh(any(), anyInt(), anyBoolean())).thenReturn(List.of(
+                new NearbyAircraft("484507", "KLM123", "PH-EXM", null, null,
+                        8_000, false, 350.0, 90.0, 0, 12.3, 60.0)));
         when(aircraftClient.getAircraft(any(), anyInt(), anyBoolean())).thenReturn(List.of(
                 new NearbyAircraft("484507", "KLM123", "PH-EXM", null, null,
                         8_000, false, 350.0, 90.0, 0, 12.3, 60.0)));
@@ -371,23 +383,113 @@ class AircraftCommandParityTests {
     }
 
     @Test
-    void radarMarksTheTrackedBlipWithASelectionBox() {
+    void radarMarksTheTrackedBlipInWhiteInsteadOfABox() {
         final AircraftScreenConfig config = config(AircraftDisplayMode.RADAR);
 
-        final List<AcmdCommand.Rect> rects = AcmdParser.parse(service.renderCommandBatch(config)).commands().stream()
-                .filter(AcmdCommand.Rect.class::isInstance)
-                .map(AcmdCommand.Rect.class::cast)
+        final List<AcmdCommand> commands = AcmdParser.parse(service.renderCommandBatch(config)).commands();
+
+        // No selection box: the tracked marker is the blip itself, rendered white.
+        assertTrue(commands.stream().noneMatch(AcmdCommand.Rect.class::isInstance), "no selection box");
+
+        // FIXTURE[0] (the tracked closest) blip (19,14) → white 2×2 FILL at (18,13).
+        // The others keep their altitude colors: FIXTURE[1] ground → yellow,
+        // FIXTURE[2] 20–30k ft → magenta; no green fill remains (that band was
+        // FIXTURE[0]'s, replaced by the white marker).
+        final List<AcmdCommand.Fill> fills = commands.stream()
+                .filter(AcmdCommand.Fill.class::isInstance)
+                .map(AcmdCommand.Fill.class::cast)
+                .toList();
+        assertTrue(fills.stream().anyMatch(f -> f.x() == 18 && f.y() == 13
+                        && f.w() == 2 && f.h() == 2 && f.color() == Rgb565.of(Color.WHITE)),
+                () -> fills.toString());
+        assertTrue(fills.stream().anyMatch(f -> f.color() == Rgb565.of(Color.YELLOW)));
+        assertTrue(fills.stream().anyMatch(f -> f.color() == Rgb565.of(Color.MAGENTA)));
+        assertTrue(fills.stream().noneMatch(f -> f.color() == Rgb565.of(Color.GREEN)));
+    }
+
+    @Test
+    void radarDrawsOneVectorForTheTrackedAircraftOnly() {
+        final AircraftScreenConfig config = config(AircraftDisplayMode.RADAR);
+
+        final List<AcmdCommand.Line> lines = AcmdParser.parse(service.renderCommandBatch(config)).commands().stream()
+                .filter(AcmdCommand.Line.class::isInstance)
+                .map(AcmdCommand.Line.class::cast)
                 .toList();
 
-        // FIXTURE[0] (the tracked closest): 12.3 NM of a 50 NM scope, bearing 60° →
-        // r = 12.3/50 × 14 ≈ 3.44 → x = 16 + round(3.44·sin60) = 19, y = 16 − round(3.44·cos60) = 14.
-        assertEquals(1, rects.size(), "exactly one selection box");
-        final AcmdCommand.Rect box = rects.getFirst();
-        assertEquals(17, box.x());
-        assertEquals(12, box.y());
-        assertEquals(4, box.w());
-        assertEquals(4, box.h());
-        assertEquals(Rgb565.of(Color.WHITE), box.color());
+        // Only the tracked (closest) aircraft carries a vector — one per blip cluttered
+        // the 14 px scope. FIXTURE[0] blip (19,14), track 90° → 3 px east: (19,14)→(22,14),
+        // white like the tracked blip it extends. FIXTURE[2] (also moving) gets none.
+        assertEquals(1, lines.size(), "exactly one vector, on the tracked aircraft");
+        final AcmdCommand.Line klm = lines.getFirst();
+        assertEquals(19, klm.x0());
+        assertEquals(14, klm.y0());
+        assertEquals(22, klm.x1());
+        assertEquals(14, klm.y1());
+        assertEquals(Rgb565.of(Color.WHITE), klm.color());
+    }
+
+    @Test
+    void radarGatesTheTrackedVectorOnKnownMotion() {
+        when(aircraftClient.getAircraftFresh(any(), anyInt(), anyBoolean())).thenReturn(List.of(
+                new NearbyAircraft("1", "BOUNDARY", null, null, null,
+                        5_000, false, 30.0, 45.0, 0, 10.0, 45.0),
+                new NearbyAircraft("2", "TOOSLOW", null, null, null,
+                        5_000, false, 25.0, 45.0, 0, 11.0, 90.0),
+                new NearbyAircraft("3", "NOTRACK", null, null, null,
+                        5_000, false, 250.0, null, 0, 12.0, 135.0)));
+
+        final List<AcmdCommand.Line> lines =
+                AcmdParser.parse(service.renderCommandBatch(config(AircraftDisplayMode.RADAR))).commands().stream()
+                        .filter(AcmdCommand.Line.class::isInstance)
+                        .map(AcmdCommand.Line.class::cast)
+                        .toList();
+
+        // The tracked (closest) aircraft sits exactly at the inclusive 30 kt floor →
+        // vector present; the other aircraft's motion would not draw one anyway.
+        assertEquals(1, lines.size());
+
+        // Tracked aircraft without usable motion data → no vector at all.
+        when(aircraftClient.getAircraftFresh(any(), anyInt(), anyBoolean())).thenReturn(List.of(
+                new NearbyAircraft("3", "NOTRACK", null, null, null,
+                        5_000, false, 250.0, null, 0, 10.0, 135.0)));
+        assertEquals(0, AcmdParser.parse(service.renderCommandBatch(config(AircraftDisplayMode.RADAR)))
+                .commands().stream()
+                .filter(AcmdCommand.Line.class::isInstance)
+                .count());
+    }
+
+    @Test
+    void radarScrollsOverflowingInfoColumnLinesAlongsideTheSweep() {
+        // 7-char callsign = 35 px > the 30 px column → marquee instead of gibberish
+        // truncation, on multi-parametric ACMD (the SWEEP keeps ticking concurrently —
+        // the reason the engine grew beyond one parametric per batch).
+        when(aircraftClient.getAircraftFresh(any(), anyInt(), anyBoolean())).thenReturn(List.of(
+                new NearbyAircraft("484507", "DLH8ANA", null, null, null,
+                        8_000, false, 350.0, 90.0, 0, 12.3, 60.0)));
+        final AircraftScreenConfig config = config(AircraftDisplayMode.RADAR);
+
+        final AcmdParser.Parsed parsed = AcmdParser.parse(service.renderCommandBatch(config));
+        assertFalse(parsed.truncated());
+        final AcmdCommand.Scroll scroll = parsed.commands().stream()
+                .filter(AcmdCommand.Scroll.class::isInstance)
+                .map(AcmdCommand.Scroll.class::cast)
+                .findFirst().orElseThrow();
+        assertEquals("DLH8ANA", scroll.ascii(), "the full callsign scrolls, untruncated");
+        assertEquals(AircraftScreenService.INFO_X, scroll.x());
+        assertEquals(AircraftScreenService.INFO_COLUMN_WIDTH, scroll.w());
+        assertEquals(AircraftScreenService.INFO_SCROLL_REGION_HEIGHT, scroll.h());
+        assertEquals(AircraftScreenService.SCROLL_MS_PER_PX, scroll.speedMsPerPx());
+        assertTrue(parsed.commands().stream().anyMatch(AcmdCommand.Sweep.class::isInstance),
+                "the SWEEP coexists with the marquee");
+
+        // The mirror renders the callsign bouncing across the column while the sweep runs
+        final AcmdMirror mirror = AcmdMirror.parse(service.renderCommandBatch(config));
+        assertEquals(2, mirror.parametricCount(), "sweep + scroll armed");
+        // "DLH8ANA" = 35 px over the 30 px column -> travel 5 px: the pass stretches to
+        // 12 px-units × 120 ms = 1440 ms (short-overflow glide) after a 960 ms head
+        // hold; t=1500 is 540 ms into the pass -> pen 1 px left of the head extreme
+        assertTrue(FrameParity.mismatchedPixels(mirror.frameAt(0), mirror.frameAt(1500)) > 0,
+                "the bouncing line moves");
     }
 
     private static void assertRadarSample(final BufferedImage golden, final AcmdMirror mirror,
@@ -401,7 +503,7 @@ class AircraftCommandParityTests {
     void overflowingLineScrollsItsFullTextInsteadOfTruncating() {
         final NearbyAircraft longType = new NearbyAircraft("484510", "DLH452", "D-ABCD",
                 "BOEING 747-8I", null, 36_000, false, 480.0, 90.0, 640, 25.0, 45.0);
-        when(aircraftClient.getAircraft(any(), anyInt(), anyBoolean())).thenReturn(List.of(longType));
+        when(aircraftClient.getAircraftFresh(any(), anyInt(), anyBoolean())).thenReturn(List.of(longType));
 
         final AcmdParser.Parsed parsed = AcmdParser.parse(service.renderCommandBatch(config(AircraftDisplayMode.CLOSEST)));
         assertFalse(parsed.truncated());
@@ -416,7 +518,7 @@ class AircraftCommandParityTests {
 
     @Test
     void emptyAirspaceBatchRendersNoAircraftPages() {
-        when(aircraftClient.getAircraft(any(), anyInt(), anyBoolean())).thenReturn(List.of());
+        when(aircraftClient.getAircraftFresh(any(), anyInt(), anyBoolean())).thenReturn(List.of());
 
         for (final AircraftDisplayMode mode : AircraftDisplayMode.values()) {
             final AcmdParser.Parsed parsed =
@@ -425,6 +527,22 @@ class AircraftCommandParityTests {
             assertTrue(parsed.commands().stream().anyMatch(c -> c instanceof AcmdCommand.Text),
                     mode + " batch carries the no-aircraft text");
         }
+    }
+
+    @Test
+    void slotStartRendersFetchFreshDataWhileOnlyTheRefreshSupplierReadsTheCache() {
+        // The "closest screen shows older data than the radar screen" regression: a
+        // slot-start render must use the foreground fetch (its result is displayed),
+        // and only the RADAR refresh supplier may take the instant SWR read.
+        final CommandScreenService.RefreshStream radar =
+                service.renderCommandRefresh(config(AircraftDisplayMode.RADAR));
+        radar.nextBatches().get();
+        verify(aircraftClient, times(1)).getAircraftFresh(any(), anyInt(), anyBoolean());
+        verify(aircraftClient, times(1)).getAircraft(any(), anyInt(), anyBoolean());
+
+        service.renderCommandBatches(config(AircraftDisplayMode.CLOSEST));
+        verify(aircraftClient, times(2)).getAircraftFresh(any(), anyInt(), anyBoolean());
+        verify(aircraftClient, times(1)).getAircraft(any(), anyInt(), anyBoolean());
     }
 
     private static AircraftScreenConfig config(final AircraftDisplayMode mode) {

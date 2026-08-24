@@ -1,6 +1,8 @@
 package nl.ctasoftware.crypto.ticker.server.service.command;
 
 import java.awt.image.BufferedImage;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Java mirror of the firmware's ACMD v1 command engine: renders a batch to a 64&times;32
@@ -12,18 +14,25 @@ import java.awt.image.BufferedImage;
  * <ul>
  *   <li>The batch renders <b>atomically</b> to a base canvas, in command order; FONT pages
  *       must precede the TEXT/SCROLL commands that reference them.</li>
- *   <li>The <b>first</b> parametric primitive (SWEEP/SCROLL/BLINK) wins; later ones are
- *       ignored (not rendered, not registered).</li>
+ *   <li><b>All</b> parametric primitives (SWEEP/SCROLL/BLINK) arm, in command order, up to
+ *       {@link AcmdOpcode#PARAMS_MAX}; further ones are ignored. Each frame starts from a
+ *       fresh copy of the base (the per-overlay region-snapshot restore), then applies the
+ *       overlays in command order — a later overlay draws over an earlier one where their
+ *       regions overlap.</li>
  *   <li>SWEEP: &theta; = (elapsedMs &times; speed / 1000) mod 360; endpoint
  *       (cx + r&middot;cos&theta;, cy + r&middot;sin&theta;) as doubles, C {@code lround}
  *       (half away from zero), GFX line drawn over the base each frame.</li>
- *   <li>SCROLL: region snapshot at commit; each frame restores the snapshot, then draws the
- *       text with glyph tops at {@code y} and penX = (x + w) &minus; scrolledPx where
- *       scrolledPx = elapsedMs / speedMsPerPx, glyph pixels clipped to the region;
- *       restarts when penX + textWidth &lt; x, i.e. scrolledPx cycles mod (w + textWidth + 1);
- *       textWidth = &Sigma; xAdvance (unknown glyph &rarr; 4).</li>
- *   <li>BLINK: region snapshot at commit; alternates content (snapshot) &harr; black every
- *       periodMs/2 ms.</li>
+ *   <li>SCROLL: ping-pong marquee with pacing — the text draws with glyph tops at
+ *       {@code y} and penX oscillating between the head-visible extreme (penX = x) and
+ *       the tail-visible extreme (penX = x + w &minus; textW), glyph pixels clipped to
+ *       the region; each extreme is held for {@link AcmdOpcode#SCROLL_HOLD_PX}
+ *       px-units before reversing, and one pass travels {@code textW - w} px in at
+ *       least {@link AcmdOpcode#SCROLL_MIN_PASS_PX} px-units ({@code speedMsPerPx} per
+ *       unit); phase 0 = the head hold; a fitting text (textW &le; w) renders
+ *       statically at x; textWidth = &Sigma; xAdvance (unknown glyph &rarr; 4).</li>
+ *   <li>BLINK: alternates content (the base region) &harr; black every periodMs/2 ms.</li>
+ *   <li>Epoch carry-over is firmware state across <b>commits</b> — two mirrors never share
+ *       it; each {@code parse} models one fresh commit (epoch 0).</li>
  * </ul>
  */
 public final class AcmdMirror {
@@ -35,7 +44,7 @@ public final class AcmdMirror {
     private final GfxCanvas base = new GfxCanvas();
     private final AcmdCommand.Glyph[][] pages = new AcmdCommand.Glyph[AcmdOpcode.FONT_PAGES][128];
     private final boolean[] pageDefined = new boolean[AcmdOpcode.FONT_PAGES];
-    private Parametric parametric;
+    private final List<Parametric> parametrics = new ArrayList<>();
 
     private AcmdMirror() {
     }
@@ -49,29 +58,36 @@ public final class AcmdMirror {
         return mirror;
     }
 
-    /** The batch's base canvas (no parametric primitive applied), 2048 RGB565 ints. */
+    /** The batch's base canvas (no parametric overlays applied), 2048 RGB565 ints. */
     public int[] baseFrame() {
         return base.copy();
     }
 
     /**
-     * Base canvas + the active parametric primitive at {@code elapsedMs} after commit
-     * (clamped to &ge; 0). Returns a fresh frame every call; the base is never mutated.
+     * Base canvas + all armed parametric overlays at {@code elapsedMs} after commit
+     * (clamped to &ge; 0), applied in command order. Returns a fresh frame every call;
+     * the base is never mutated.
      */
     public int[] frameAt(long elapsedMs) {
         if (elapsedMs < 0) {
             elapsedMs = 0;
         }
         final int[] frame = baseFrame();
-        if (parametric != null) {
-            parametric.apply(new GfxCanvas(frame), elapsedMs);
+        final GfxCanvas canvas = new GfxCanvas(frame);
+        for (final Parametric parametric : parametrics) {
+            parametric.apply(canvas, elapsedMs);
         }
         return frame;
     }
 
-    /** True when the batch registered a SWEEP/SCROLL/BLINK (the first one). */
+    /** True when the batch armed at least one SWEEP/SCROLL/BLINK. */
     public boolean hasParametric() {
-        return parametric != null;
+        return !parametrics.isEmpty();
+    }
+
+    /** Number of armed parametric overlays (at most {@link AcmdOpcode#PARAMS_MAX}). */
+    public int parametricCount() {
+        return parametrics.size();
     }
 
     /** RGB565 &rarr; TYPE_INT_RGB bridge (5/6/5 bits expanded by replicating the high bits). */
@@ -169,8 +185,8 @@ public final class AcmdMirror {
     }
 
     private void registerParametric(final Parametric candidate) {
-        if (parametric == null) {
-            parametric = candidate; // first parametric primitive wins
+        if (parametrics.size() < AcmdOpcode.PARAMS_MAX) {
+            parametrics.add(candidate); // all parametrics arm, in command order, up to the cap
         }
     }
 
@@ -193,6 +209,11 @@ public final class AcmdMirror {
         return (int) (v >= 0 ? Math.floor(v + 0.5) : Math.ceil(v - 0.5));
     }
 
+    /**
+     * One armed overlay. Every {@link #frameAt} starts from a fresh copy of the committed
+     * base — that copy IS the firmware's per-tick full-canvas restore, so an overlay only
+     * ever DRAWS; it never clears or snapshots its region itself.
+     */
     private sealed interface Parametric permits SweepState, ScrollState, BlinkState {
         void apply(GfxCanvas frame, long elapsedMs);
     }
@@ -231,8 +252,6 @@ public final class AcmdMirror {
         private final int speedMsPerPx;
         private final String ascii;
         private final AcmdCommand.Glyph[] page;
-        private int[] snapshot;
-        private boolean snapshotted;
 
         ScrollState(final AcmdCommand.Scroll s, final AcmdCommand.Glyph[] page) {
             this.x = s.x();
@@ -247,20 +266,38 @@ public final class AcmdMirror {
 
         @Override
         public void apply(final GfxCanvas frame, final long elapsedMs) {
-            // The firmware restores from the fully-committed base canvas (immutable after
-            // commit); capture lazily on first apply, when `frame` is still a pristine
-            // copy of the final base — snapshots taken mid-batch would miss commands
-            // that paint inside the region after the SCROLL command itself.
-            if (!snapshotted) {
-                snapshot = frame.snapshotRegion(x, y, w, h);
-                snapshotted = true;
+            // Ping-pong marquee with readability pacing: penX oscillates between the
+            // head-visible extreme (penX = x, tail clipped right) and the tail-visible
+            // extreme (penX = x + w − textW, head clipped left) — the text never leaves
+            // the region — HOLDING SCROLL_HOLD_PX px-units of time at each extreme
+            // before reversing. One pass travels textW − w px in at least
+            // SCROLL_MIN_PASS_PX px-units (a barely-overflowing text glides instead of
+            // rattling); one px-unit is speedMsPerPx. Phase 0 = the head hold. A text
+            // that fits (textW ≤ w) renders statically at x.
+            final int textW = textWidth(ascii, page);
+            final int travel = textW - w;
+            final int penX;
+            if (travel < 1) {
+                penX = x;
+            } else {
+                final long vt = Math.max(travel, AcmdOpcode.SCROLL_MIN_PASS_PX);
+                final long passMs = vt * Math.max(1, speedMsPerPx);
+                final long holdMs = (long) AcmdOpcode.SCROLL_HOLD_PX * Math.max(1, speedMsPerPx);
+                final long cyc = Math.floorMod(elapsedMs, 2 * (holdMs + passMs));
+                long pen; // px left of the head extreme, 0..travel
+                if (cyc < holdMs) {
+                    pen = 0; // head hold
+                } else if (cyc < holdMs + passMs) {
+                    pen = (cyc - holdMs) * travel / passMs; // right → left pass
+                } else if (cyc < 2 * holdMs + passMs) {
+                    pen = travel; // tail hold
+                } else {
+                    pen = travel - (cyc - 2 * holdMs - passMs) * travel / passMs; // left → right pass
+                }
+                penX = x - (int) pen;
             }
-            frame.restoreRegion(x, y, w, h, snapshot); // per-step snapshot restore
-            final int cycle = Math.max(1, w + textWidth(ascii, page) + 1); // restart when penX + textWidth < x
-            final long scrolledPx = (elapsedMs / Math.max(1, speedMsPerPx)) % cycle;
-            final int penX = (x + w) - (int) scrolledPx;
             if (page == null) {
-                return; // page undefined at commit: nothing to draw, cycle still advances
+                return; // page undefined at commit: nothing to draw, the phase still advances
             }
             final int[] clip = {x, y, w, h};
             int px = penX;
@@ -299,8 +336,6 @@ public final class AcmdMirror {
         private final int w;
         private final int h;
         private final long periodMs;
-        private int[] snapshot;
-        private boolean snapshotted;
 
         BlinkState(final AcmdCommand.Blink b) {
             this.x = b.x();
@@ -312,17 +347,11 @@ public final class AcmdMirror {
 
         @Override
         public void apply(final GfxCanvas frame, final long elapsedMs) {
-            if (!snapshotted) {
-                snapshot = frame.snapshotRegion(x, y, w, h);
-                snapshotted = true;
-            }
             // Firmware phase: black during the second half of each period-boundary cycle
             // ((elapsed % period) >= period/2) — NOT toggle-every-floor(p/2), which drifts
-            // for odd periods.
+            // for odd periods. Content phase = the base copy already in the frame.
             if (Math.floorMod(elapsedMs, periodMs) >= periodMs / 2) {
                 frame.fillRegionDirect(x, y, w, h, BLACK); // dark phase
-            } else {
-                frame.restoreRegion(x, y, w, h, snapshot); // content phase
             }
         }
     }

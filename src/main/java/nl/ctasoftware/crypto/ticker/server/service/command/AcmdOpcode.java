@@ -29,6 +29,12 @@ public final class AcmdOpcode {
     public static final int VERSION = 1;
     public static final int TEXT_MAX_LEN = 255;
     public static final int FONT_PAGES = 4;
+    /** Max armed parametrics per batch (SWEEP/SCROLL/BLINK, in command order); further ones are ignored. */
+    public static final int PARAMS_MAX = 4;
+    /** SCROLL ping-pong pacing: px-units ({@code × speedMsPerPx}) held at each extreme before reversing. */
+    public static final int SCROLL_HOLD_PX = 8;
+    /** SCROLL ping-pong pacing: minimum px-units per pass — a barely-overflowing text glides, not rattles. */
+    public static final int SCROLL_MIN_PASS_PX = 12;
     public static final int GLYPH_MAX_DIM = 32;
     public static final int UNKNOWN_GLYPH_ADVANCE = 4;
 

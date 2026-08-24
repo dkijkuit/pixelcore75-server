@@ -10,6 +10,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -130,32 +131,69 @@ class AcmdMirrorTests {
     }
 
     @Test
-    void scrollStepsClipAndRestart() {
+    void scrollBouncesBetweenHeadAndTailExtremes() {
+        // "AAAAAAAB": textW = 7×3 + 2 = 23 over a 4 px region → travel 19; speed 10 →
+        // passMs = max(19,12)×10 = 190, holdMs = 8×10 = 80, half-cycle 270, cycle 540
         final byte[] framed = CommandBatch.builder()
                 .cls(BLACK)
-                .pix(5, 4, RED) // base content inside the region, must survive every step
+                .pix(2, 4, RED) // base content inside the region, must survive every step
                 .fontPage(0, handGlyphs())
-                .scroll(0, 0, 20, 8, 0, WHITE, 10, "A") // textWidth=3, cycle=20+3+1=24
+                .scroll(0, 0, 4, 8, 0, WHITE, 10, "AAAAAAAB")
                 .build();
         final AcmdMirror mirror = AcmdMirror.parse(framed);
 
-        // t=0: penX=20 -> glyph starts exactly at the region's right edge, clipped out
-        assertEquals(Set.of(), where(mirror.frameAt(0), WHITE));
-        assertEquals(Set.of("5,4"), where(mirror.frameAt(0), RED), "snapshot content visible");
+        // t=0 (head hold): penX=0 -> A1 (0,0),(1,1); A2's (4,1) clipped; the hold is
+        // a PAUSE — t=40 (mid hold) renders the identical frame
+        assertEquals(Set.of("0,0", "1,1", "3,0"), where(mirror.frameAt(0), WHITE));
+        assertArrayEquals(mirror.frameAt(0), mirror.frameAt(40), "head hold is static");
+        assertEquals(Set.of("2,4"), where(mirror.frameAt(40), RED), "base content visible");
 
-        // t=10: scrolledPx=1 -> penX=19 -> (19,0) visible, (20,1) clipped by region
-        assertEquals(Set.of("19,0"), where(mirror.frameAt(10), WHITE));
+        // t=190 (mid left pass): pen = 110×19/190 = 11 -> penX=-11 -> only A5's
+        // pixels (1,0),(2,1) fall inside the 4 px region
+        assertEquals(Set.of("1,0", "2,1"), where(mirror.frameAt(190), WHITE));
+        assertEquals(Set.of("2,4"), where(mirror.frameAt(190), RED), "base content restored under text");
 
-        // t=100: scrolledPx=10 -> penX=10 -> both glyph pixels visible
-        assertEquals(Set.of("10,0", "11,1"), where(mirror.frameAt(100), WHITE));
-        assertEquals(Set.of("5,4"), where(mirror.frameAt(100), RED), "snapshot restored under text");
+        // t=270..350 (tail hold): penX = x - travel = -19 -> A7 at -1 shows (0,1),
+        // B at 2 shows (2,0); static through the hold
+        assertEquals(Set.of("0,1", "2,0"), where(mirror.frameAt(270), WHITE));
+        assertArrayEquals(mirror.frameAt(270), mirror.frameAt(310), "tail hold is static");
 
-        // t=230: scrolledPx=23 -> penX=-3 -> fully scrolled out left
-        assertEquals(Set.of(), where(mirror.frameAt(230), WHITE));
+        // Full cycle: 2×(80+190) = 540 -> back to the head hold
+        assertArrayEquals(mirror.frameAt(0), mirror.frameAt(540));
+    }
 
-        // t=240: scrolledPx=24 -> mod cycle 24 -> restart at penX=20 (same as t=0)
-        assertEquals(Set.of(), where(mirror.frameAt(240), WHITE));
-        assertEquals(Set.of("19,0"), where(mirror.frameAt(250), WHITE), "text re-enters after restart");
+    @Test
+    void scrollWithFittingTextStaysStaticAtTheRegionLeft() {
+        // textW = 3 < w = 20: nothing to reveal — the ping-pong has no travel span
+        final byte[] framed = CommandBatch.builder()
+                .fontPage(0, handGlyphs())
+                .scroll(0, 0, 20, 8, 0, WHITE, 10, "A")
+                .build();
+        final AcmdMirror mirror = AcmdMirror.parse(framed);
+
+        for (final long t : new long[]{0, 100, 500}) {
+            assertEquals(Set.of("0,0", "1,1"), where(mirror.frameAt(t), WHITE), "static at t=" + t);
+        }
+    }
+
+    @Test
+    void shortOverflowScrollGlidesAtTheMinimumPassRate() {
+        // "AA" over 5 px: travel 1 px — without the minimum pass it would cross in one
+        // speed tick (10 ms); SCROLL_MIN_PASS_PX stretches the pass to 12 px-units
+        // (120 ms), so the 1 px step lands only at progress ≥ 120/1... i.e. pen flips
+        // exactly once per pass, at t = hold + pass (the tail extreme)
+        final byte[] framed = CommandBatch.builder()
+                .fontPage(0, handGlyphs())
+                .scroll(0, 0, 5, 8, 0, WHITE, 10, "AA")
+                .build();
+        final AcmdMirror mirror = AcmdMirror.parse(framed);
+
+        // t=80: head hold just ended, progress 0 -> pen 0 -> both A's visible at 0,3
+        assertEquals(Set.of("0,0", "1,1", "3,0", "4,1"), where(mirror.frameAt(80), WHITE));
+        // t=139: progress 59 ms of the 120 ms pass -> 59×1/120 = 0 (trunc) -> still pen 0
+        assertEquals(Set.of("0,0", "1,1", "3,0", "4,1"), where(mirror.frameAt(139), WHITE));
+        // t=200: tail hold -> pen 1 -> penX=-1 -> A1's diagonal (0,1) plus A2 at (2,0),(3,1)
+        assertEquals(Set.of("0,1", "2,0", "3,1"), where(mirror.frameAt(200), WHITE));
     }
 
     @Test
@@ -182,20 +220,24 @@ class AcmdMirrorTests {
     }
 
     @Test
-    void firstParametricPrimitiveWins() {
+    void allParametricsCompositeInCommandOrder() {
         final byte[] sweepThenBlink = CommandBatch.builder()
                 .cls(RED)
                 .sweep(30, 16, 5, WHITE, 90)
                 .blink(2, 3, 4, 5, 1000)
                 .build();
         final AcmdMirror mirror = AcmdMirror.parse(sweepThenBlink);
-        // at t=500 the blink would black its region; the sweep owns the frame instead
+        assertEquals(2, mirror.parametricCount(), "sweep AND blink arm");
+        // t=500: the blink blacks its region AND the sweep draws over the base — the
+        // sweep's line pixels inside the region draw AFTER the black fill (command order)
         final int[] frame = mirror.frameAt(500);
-        assertEquals(RED, frame[3 * 64 + 2], "blink region untouched: sweep won");
+        assertEquals(BLACK, frame[3 * 64 + 2], "blink region black");
         assertTrue(where(frame, WHITE).contains("30,16"), "sweep pivot drawn");
         // theta=(500*90/1000)=45deg -> endpoint (34,20)
         assertTrue(where(frame, WHITE).contains("34,20"));
 
+        // Reversed order: the sweep draws first, the blink's black fill erases any line
+        // pixels inside its region (later overlay wins the overlap)
         final byte[] blinkThenSweep = CommandBatch.builder()
                 .cls(RED)
                 .blink(2, 3, 4, 5, 1000)
@@ -203,7 +245,54 @@ class AcmdMirrorTests {
                 .build();
         final int[] frame2 = AcmdMirror.parse(blinkThenSweep).frameAt(500);
         assertEquals(BLACK, frame2[3 * 64 + 2], "blink active");
-        assertEquals(Set.of(), where(frame2, WHITE), "sweep ignored: blink won");
+        // t=500 dark phase: the sweep's 45deg line (30,16)..(34,20) lies outside the
+        // blink region (x 2..5, y 3..7), so it survives either draw order
+        assertTrue(where(frame2, WHITE).contains("34,20"), "sweep drawn alongside the blink");
+    }
+
+    @Test
+    void parametricCapArmsFirstFourAndIgnoresFurtherOnes() {
+        final byte[] five = CommandBatch.builder()
+                .cls(BLACK)
+                .sweep(30, 16, 5, WHITE, 90)
+                .blink(2, 3, 4, 5, 1000)
+                .blink(10, 3, 4, 5, 1000)
+                .blink(20, 3, 4, 5, 1000)
+                .blink(30, 3, 4, 5, 1000) // 5th parametric — ignored
+                .build();
+        final AcmdMirror mirror = AcmdMirror.parse(five);
+
+        assertEquals(4, mirror.parametricCount());
+        final int[] frame = mirror.frameAt(500); // all four armed blinks are in dark phase
+        assertEquals(BLACK, frame[3 * 64 + 30], "4th blink armed");
+        assertEquals(BLACK, frame[3 * 64 + 2], "1st blink armed");
+    }
+
+    @Test
+    void sweepAndScrollRunConcurrently() {
+        // 9 A's: textW = 27 over a 20 px region -> travel 7, cycle 14 (10 ms/px)
+        final byte[] framed = CommandBatch.builder()
+                .cls(BLACK)
+                .fontPage(0, handGlyphs())
+                .sweep(10, 20, 5, WHITE, 90)
+                .scroll(40, 0, 20, 8, 0, GREEN, 10, "AAAAAAAAA")
+                .build();
+        final AcmdMirror mirror = AcmdMirror.parse(framed);
+
+        // t=100: sweep at theta 9deg — line (10,20)..(15,21); scroll: head hold ends at
+        // 80, so 20 ms into the left pass -> pen = 20×7/120 = 1 -> penX=39 -> glyph
+        // pens 39,42,...,63, pixels (pen,0),(pen+1,1) clipped to x in [40,59]; both
+        // parametrics coexist in one frame
+        final int[] frame = mirror.frameAt(100);
+        assertEquals(Set.of("40,1", "42,0", "43,1", "45,0", "46,1", "48,0", "49,1",
+                        "51,0", "52,1", "54,0", "55,1", "57,0", "58,1"),
+                where(frame, GREEN));
+        assertTrue(where(frame, WHITE).contains("10,20"), "sweep pivot");
+        assertEquals(6, where(frame, WHITE).size(), "one sweep line (6 px, Bresenham)");
+
+        // The bounce moves: t=0 sits in the head hold (penX = 40)
+        final int[] head = mirror.frameAt(0);
+        assertNotEquals(where(head, GREEN), where(frame, GREEN), "scroll position differs across the bounce");
     }
 
     @Test

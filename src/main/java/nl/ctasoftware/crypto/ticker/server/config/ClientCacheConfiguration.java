@@ -131,10 +131,24 @@ public class ClientCacheConfiguration {
                 Thread.ofVirtual().name("adsblol-refresh-", 0).factory());
     }
 
+    /**
+     * The loader as its own bean so {@link AdsbLolAircraftClient} can run it directly
+     * for foreground slot-start fetches ({@code getAircraftFresh}) — the cache itself
+     * only exposes the stale-while-revalidate read.
+     */
+    @Bean
+    AdsbLolAircraftClient.AdsbLolCacheLoader adsbLolCacheLoader(
+            @Qualifier("adsbLolRestClient") final RestClient adsbLolRestClient,
+            @Qualifier("adsbFiRestClient") final RestClient adsbFiRestClient) {
+        return new AdsbLolAircraftClient.AdsbLolCacheLoader(List.of(
+                new AircraftApiProvider("adsb.lol", adsbLolRestClient),
+                new AircraftApiProvider("adsb.fi", adsbFiRestClient,
+                        AircraftApiProvider.PointPathStyle.LAT_LON_DIST)));
+    }
+
     @Bean
     LoadingCache<AdsbLolRequest, List<NearbyAircraft>> adsbLolNearbyCache(
-            @Qualifier("adsbLolRestClient") final RestClient adsbLolRestClient,
-            @Qualifier("adsbFiRestClient") final RestClient adsbFiRestClient,
+            @Qualifier("adsbLolCacheLoader") final AdsbLolAircraftClient.AdsbLolCacheLoader adsbLolCacheLoader,
             @Qualifier("adsbLolRefreshExecutor") final ExecutorService adsbLolRefreshExecutor) {
         return Caffeine.newBuilder()
                 .initialCapacity(1)
@@ -142,10 +156,7 @@ public class ClientCacheConfiguration {
                 .expireAfterWrite(60, TimeUnit.SECONDS)
                 .refreshAfterWrite(2, TimeUnit.SECONDS)
                 .executor(adsbLolRefreshExecutor)
-                .build(new AdsbLolAircraftClient.AdsbLolCacheLoader(List.of(
-                        new AircraftApiProvider("adsb.lol", adsbLolRestClient),
-                        new AircraftApiProvider("adsb.fi", adsbFiRestClient,
-                                AircraftApiProvider.PointPathStyle.LAT_LON_DIST))));
+                .build(adsbLolCacheLoader);
     }
 
     /**

@@ -16,6 +16,8 @@ import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.AircraftScree
 import nl.ctasoftware.crypto.ticker.server.service.screen.animation.AnimationScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.clock.ClockScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.CryptoScreenService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.custom.CustomScreenResolver;
+import nl.ctasoftware.crypto.ticker.server.service.screen.custom.CustomScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.date.DateScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.formula1.Formula1ScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.image.ImageScreenService;
@@ -96,6 +98,13 @@ public class PanelScreenJob implements ReschedulableJob {
     final AnimationLoadAckService animationLoadAckService;
 
     /**
+     * Resolves CUSTOM library references ({@code customScreenId}) to their current design
+     * each cycle, so library edits propagate live; dangling references are skipped.
+     * Identity in the legacy constructor (configs that never carry references).
+     */
+    final CustomScreenResolver customScreenResolver;
+
+    /**
      * {@code pixelcore75.command-encoding.enabled} (default false): screens whose service
      * implements {@link CommandScreenService} render as ACMD batches on {@code <serial>/cmd}
      * instead of frames/static images. Opt-in for the mixed fleet: old firmware never
@@ -120,6 +129,18 @@ public class PanelScreenJob implements ReschedulableJob {
                           final AnimationLoadAckService animationLoadAckService,
                           final ConcurrentMap<String, AtomicInteger> previewGenerations,
                           final boolean commandEncodingEnabled) {
+        this(px75Panel, panelConfig, screenServices, imageService, mqttClient, imageBroadcasterService,
+                animationLoadAckService, previewGenerations, commandEncodingEnabled, config -> config);
+    }
+
+    public PanelScreenJob(final Px75Panel px75Panel, final Px75PanelConfig panelConfig,
+                          final List<ScreenService<? extends ScreenConfig>> screenServices,
+                          final ImageService imageService, final IMqttClient mqttClient,
+                          final ImageBroadcasterService imageBroadcasterService,
+                          final AnimationLoadAckService animationLoadAckService,
+                          final ConcurrentMap<String, AtomicInteger> previewGenerations,
+                          final boolean commandEncodingEnabled,
+                          final CustomScreenResolver customScreenResolver) {
         this.px75Panel = px75Panel;
         this.panelConfig = panelConfig;
         this.imageService = imageService;
@@ -131,6 +152,7 @@ public class PanelScreenJob implements ReschedulableJob {
         this.animationLoadAckService = animationLoadAckService;
         this.previewGenerations = previewGenerations;
         this.commandEncodingEnabled = commandEncodingEnabled;
+        this.customScreenResolver = customScreenResolver;
         this.id = px75Panel.getSerial();
     }
 
@@ -142,9 +164,9 @@ public class PanelScreenJob implements ReschedulableJob {
     @Override
     public Optional<Duration> run() {
 
-        final List<? extends ScreenConfig> screensConfig = panelConfig.getScreensConfig();
+        final List<? extends ScreenConfig> rawConfig = panelConfig.getScreensConfig();
 
-        if (screensConfig == null || screensConfig.isEmpty()) {
+        if (rawConfig == null || rawConfig.isEmpty()) {
             log.warn("----> No screen configs found, not scheduling screen jobs for panel: {}", panelConfig.getPanelId());
             final BufferedImage missingConfigImage = imageService.imageToBufferedImage("assets/images/no_config_found.png");
             try {
@@ -155,6 +177,24 @@ public class PanelScreenJob implements ReschedulableJob {
             }
 
             return Optional.empty();
+        }
+
+        // Resolve CUSTOM library references to their current design each cycle (edits to a
+        // library screen propagate to every panel using it). Dangling references are
+        // dropped with a warning so one deleted screen cannot break the whole rotation.
+        final List<? extends ScreenConfig> screensConfig = hydratedScreens(rawConfig);
+        if (screensConfig.isEmpty()) {
+            log.warn("----> All screens of panel {} reference missing custom screens; retrying in 30s",
+                    panelConfig.getPanelId());
+            try {
+                final BufferedImage missingConfigImage =
+                        imageService.imageToBufferedImage("assets/images/no_config_found.png");
+                sendImageToPanel(missingConfigImage);
+                scaleImageAndPublish(missingConfigImage);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+            return Optional.of(Duration.ofSeconds(30));
         }
 
         if (!running.get()) {
@@ -168,13 +208,13 @@ public class PanelScreenJob implements ReschedulableJob {
         }
 
         final int previewGeneration = bumpPreviewGeneration();
-        final int screenIdx = getScreenIndex();
+        final int screenIdx = getScreenIndex(screensConfig);
         final ScreenConfig screenConfig = screensConfig.get(screenIdx);
 
         long durationMillis;
         try {
             log.debug("----> Next screen job for panel: {}", panelConfig.getPanelId());
-            renderScreen(screenConfig, previewGeneration, screenIdx);
+            renderScreen(screenConfig, screensConfig, previewGeneration, screenIdx);
         } catch (Exception e) {
             log.error("Error rendering screen job for panel: {}", panelConfig.getPanelId(), e);
         }
@@ -196,7 +236,8 @@ public class PanelScreenJob implements ReschedulableJob {
 
     }
 
-    void renderScreen(final ScreenConfig screenConfig, final int previewGeneration, final int screenIdx) {
+    void renderScreen(final ScreenConfig screenConfig, final List<? extends ScreenConfig> screens,
+                      final int previewGeneration, final int screenIdx) {
         final ScreenService<? extends ScreenConfig> screenService = screenServices.get(screenConfig.screenType());
         if (screenService == null) {
             throw new ScreenServiceNotFoundException(screenConfig.screenType());
@@ -204,23 +245,25 @@ public class PanelScreenJob implements ReschedulableJob {
 
         log.debug("------> Rendering screen {} for panel {}", screenConfig.screenType(), panelConfig.getPanelId());
 
-        // ACMD command path (plan §6): flag ON + the service implements it → publish the
-        // first batch to <serial>/cmd (multi-page screens cycle their further batches at
-        // each page dwell; live screens refresh theirs on the refresh grid). Batch build
-        // failures fall back to the screen's regular path (the flag is a fleet-wide
-        // toggle, a single screen must not break a slot).
-        if (commandEncodingEnabled && screenService instanceof CommandScreenService) {
+        // ACMD command path (plan §6): flag ON + the service implements it and declares this
+        // config command-capable (CUSTOM: only parametric designs) → publish the first batch
+        // to <serial>/cmd (multi-page screens cycle their further batches at each page dwell;
+        // live screens refresh theirs on the refresh grid). Batch build failures fall back to
+        // the screen's regular path (the flag is a fleet-wide toggle, a single screen must not
+        // break a slot).
+        if (commandEncodingEnabled && screenService instanceof CommandScreenService<?>
+                && isCommandCapable(screenService, screenConfig)) {
             @SuppressWarnings("unchecked")
-            final CommandScreenService<ScreenConfig> commandScreenService =
+            final CommandScreenService<ScreenConfig> capableService =
                     (CommandScreenService<ScreenConfig>) screenService;
             final CommandScreenService.RefreshStream refresh =
-                    buildCommandRefresh(commandScreenService, screenConfig);
+                    buildCommandRefresh(capableService, screenConfig);
             if (refresh != null) {
                 renderRefreshingCommandScreen(refresh, screenConfig, previewGeneration);
                 return;
             }
             final CommandScreenService.BatchStream stream =
-                    buildCommandBatches(commandScreenService, screenConfig);
+                    buildCommandBatches(capableService, screenConfig);
             if (stream != null) {
                 renderCommandScreen(stream, screenConfig, previewGeneration);
                 return;
@@ -228,7 +271,7 @@ public class PanelScreenJob implements ReschedulableJob {
         }
 
         if (screenConfig instanceof FrameScreenConfig frameScreenConfig && frameScreenConfig.producesFrames()) {
-            renderFrameScreen((FrameScreenService) screenService, frameScreenConfig, previewGeneration, screenIdx);
+            renderFrameScreen((FrameScreenService) screenService, frameScreenConfig, screens, previewGeneration, screenIdx);
             return;
         }
 
@@ -242,6 +285,7 @@ public class PanelScreenJob implements ReschedulableJob {
             case Formula1ScreenConfig i -> ((Formula1ScreenService) screenService).renderScreen(i);
             case AircraftScreenConfig a -> ((AircraftScreenService) screenService).renderScreen(a);
             case AnimationScreenConfig a -> ((AnimationScreenService) screenService).renderScreen(a);
+            case CustomScreenConfig c -> ((CustomScreenService) screenService).renderScreen(c);
         };
 
         screenImage.ifPresent(this::sendImageToPanel);
@@ -249,6 +293,7 @@ public class PanelScreenJob implements ReschedulableJob {
 
     private <T extends FrameScreenConfig> void renderFrameScreen(final FrameScreenService<T> screenService,
                                                                  final T screenConfig,
+                                                                 final List<? extends ScreenConfig> screens,
                                                                  final int previewGeneration,
                                                                  final int screenIdx) {
         final FrameScreenService.FrameStream stream = screenService.renderFrameStream(screenConfig);
@@ -256,7 +301,7 @@ public class PanelScreenJob implements ReschedulableJob {
         final long frameDelayMs = stream.frameDelayMs();
         final long slotNanos = Duration.ofSeconds(screenConfig.durationSeconds()).toNanos();
         final String serial = px75Panel.getSerial();
-        final int slot = animationSlotFor(screenIdx, panelConfig.getScreensConfig());
+        final int slot = animationSlotFor(screenIdx, screens);
         final List<byte[]> payloads = framePayloads(frames);
 
         try {
@@ -360,6 +405,19 @@ public class PanelScreenJob implements ReschedulableJob {
                     screenConfig.screenType(), panelConfig.getPanelId(), e);
             return null;
         }
+    }
+
+    /**
+     * {@code CommandScreenService#commandCapable} without the wildcard-capture headache:
+     * false (never throwing) also for a service that is not a {@code CommandScreenService}
+     * at all — the callers gate the command branch on this plus the flag.
+     */
+    @SuppressWarnings("unchecked")
+    private static boolean isCommandCapable(final ScreenService<? extends ScreenConfig> screenService,
+                                            final ScreenConfig screenConfig) {
+        return screenService instanceof CommandScreenService<?>
+                && screenConfig != null
+                && ((CommandScreenService<ScreenConfig>) screenService).commandCapable(screenConfig);
     }
 
     /**
@@ -672,10 +730,12 @@ public class PanelScreenJob implements ReschedulableJob {
             return 0;
         }
 
-        // That boundary will render via ACMD commands instead: uploading the frame stream
-        // now would be dead weight (flash writes for a batch the panel never plays).
+        // That boundary will render via ACMD commands instead (only command-capable configs —
+        // CUSTOM frame designs keep ANIM staging): uploading the frame stream now would be
+        // dead weight (flash writes for a batch the panel never plays).
         if (commandEncodingEnabled
-                && screenServices.get(animConfig.screenType()) instanceof CommandScreenService) {
+                && screenServices.get(animConfig.screenType()) instanceof CommandScreenService<?>
+                && isCommandCapable(screenServices.get(animConfig.screenType()), animConfig)) {
             return 0;
         }
 
@@ -914,11 +974,45 @@ public class PanelScreenJob implements ReschedulableJob {
         imageBroadcasterService.updateLatest(px75Panel.getSerial(), scaledImage);
     }
 
-    int getScreenIndex() {
-        if (screenIndex.incrementAndGet() >= panelConfig.getScreensConfig().size()) {
+    int getScreenIndex(final List<? extends ScreenConfig> screens) {
+        if (screenIndex.incrementAndGet() >= screens.size()) {
             screenIndex.set(0);
         }
 
         return screenIndex.get();
+    }
+
+    /**
+     * Working copy of the rotation for this cycle: CUSTOM library references hydrated to
+     * their current design (so library edits apply without a panel re-save), dangling
+     * references dropped with a warning. The stored entity keeps its references — this
+     * list is never persisted.
+     */
+    private List<? extends ScreenConfig> hydratedScreens(final List<? extends ScreenConfig> rawConfig) {
+        boolean anyReference = false;
+        for (final ScreenConfig config : rawConfig) {
+            if (config instanceof CustomScreenConfig custom && custom.customScreenId() != null) {
+                anyReference = true;
+                break;
+            }
+        }
+        if (!anyReference) {
+            return rawConfig;
+        }
+        final List<ScreenConfig> hydrated = new java.util.ArrayList<>(rawConfig.size());
+        for (final ScreenConfig config : rawConfig) {
+            if (config instanceof CustomScreenConfig custom && custom.customScreenId() != null) {
+                final CustomScreenConfig resolved = customScreenResolver.hydrate(custom);
+                if (resolved == null) {
+                    log.warn("------> Custom screen {} referenced by panel {} no longer exists; skipping it",
+                            custom.customScreenId(), panelConfig.getPanelId());
+                    continue;
+                }
+                hydrated.add(resolved);
+                continue;
+            }
+            hydrated.add(config);
+        }
+        return List.copyOf(hydrated);
     }
 }

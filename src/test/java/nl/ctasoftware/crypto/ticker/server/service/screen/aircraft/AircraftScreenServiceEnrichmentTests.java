@@ -180,7 +180,7 @@ class AircraftScreenServiceEnrichmentTests {
     }
 
     private void givenAircraft() {
-        when(aircraftClient.getAircraft(any(), anyInt(), anyBoolean()))
+        when(aircraftClient.getAircraftFresh(any(), anyInt(), anyBoolean()))
                 .thenReturn(List.of(new NearbyAircraft(HEX, CALLSIGN, "G-TEST", "A319", null,
                         35_000, false, 450.0, 90.0, 0, 12.5, 45.0)));
     }

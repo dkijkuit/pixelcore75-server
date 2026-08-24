@@ -4,6 +4,7 @@ import nl.ctasoftware.crypto.ticker.server.model.Px75Panel;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.AircraftScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.AnimationScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ClockScreenConfig;
+import nl.ctasoftware.crypto.ticker.server.model.panel.config.CustomScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.Px75PanelConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenType;
@@ -214,6 +215,46 @@ class PanelScreenJobCommandTests {
     }
 
     /**
+     * A CUSTOM screen whose per-design {@code commandCapable} is stubbed: the real service
+     * derives it from the design (parametric layers), the job must gate both the command
+     * branch and the staging skip on it.
+     */
+    private static final class StubCustomService
+            extends nl.ctasoftware.crypto.ticker.server.service.screen.custom.CustomScreenService {
+        final boolean capable;
+
+        StubCustomService(final boolean capable) {
+            super(new PaintToolsService(null, null, null), null, null, null, null, null, null, null);
+            this.capable = capable;
+        }
+
+        @Override
+        public boolean commandCapable(
+                final nl.ctasoftware.crypto.ticker.server.model.panel.config.CustomScreenConfig screenConfig) {
+            return capable;
+        }
+
+        @Override
+        public byte[] renderCommandBatch(
+                final nl.ctasoftware.crypto.ticker.server.model.panel.config.CustomScreenConfig screenConfig) {
+            return CommandBatch.builder().cls(0x0000).blink(0, 0, 8, 8, 500).build();
+        }
+
+        @Override
+        public Optional<BufferedImage> renderScreen(
+                final nl.ctasoftware.crypto.ticker.server.model.panel.config.CustomScreenConfig screenConfig) {
+            return Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+        }
+
+        @Override
+        public List<BufferedImage> renderFrames(
+                final nl.ctasoftware.crypto.ticker.server.model.panel.config.CustomScreenConfig screenConfig) {
+            return List.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB),
+                    new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+        }
+    }
+
+    /**
      * A RADAR-style live screen: a fresh batch every render (the pixel's y encodes the
      * render counter, so republished payloads prove re-rendered data) and a 300 ms
      * refresh stream (one whole sweep loop per refresh, like the real radar's contract).
@@ -322,6 +363,47 @@ class PanelScreenJobCommandTests {
     }
 
     @Test
+    void capableCustomDesignRendersViaCommandsFlagOn() throws Exception {
+        newJob(true, new StubCustomService(true), customConfig(SINGLE_FRAME_DESIGN)).run();
+
+        assertEquals(2, pubs.size(), "retained clear + the command batch");
+        assertEquals(SERIAL + "/cmd", pubs.get(1).topic());
+        assertEquals(AcmdCommand.Blink.class,
+                AcmdParser.parse(pubs.get(1).payload()).commands().get(1).getClass());
+    }
+
+    @Test
+    void frameDesignCustomScreenKeepsItsPathsDespiteTheCommandInterface() throws Exception {
+        // Flag ON and the CUSTOM service implements CommandScreenService — but this design
+        // is not command-capable: a single-frame design takes the static retained path...
+        newJob(true, new StubCustomService(false), customConfig(SINGLE_FRAME_DESIGN)).run();
+
+        assertEquals(1, pubs.size(), "one static retained frame publish, nothing else");
+        assertEquals(SERIAL, pubs.getFirst().topic());
+        assertTrue(pubs.getFirst().retained());
+        assertTrue(pubs.stream().noneMatch(p -> p.topic().endsWith("/cmd")),
+                "an incapable design must never reach /cmd");
+    }
+
+    @Test
+    void stagingUploadsIncapableCustomFrameDesigns() throws Exception {
+        ackUploads = true;
+        // ...and a multi-frame design still stages its ANIM upload for the next boundary.
+        final PanelScreenJob job = newJob(true, new StubClockService(), new StubCustomService(false),
+                clockConfig(), customConfig(TWO_FRAME_DESIGN));
+
+        job.run(); // clock boundary: stage the custom animation
+
+        assertEquals(1, pubs(p -> p.topic().equals(SERIAL + PanelScreenJob.ANIM_START_TOPIC)).size(),
+                "the frame-design CUSTOM must stage its animation despite the command interface");
+        // The clock boundary legitimately publishes its own /cmd batch (pub #2); nothing
+        // after it may touch /cmd — the incapable custom stays on the ANIM pipeline.
+        assertEquals(SERIAL + "/cmd", pubs.get(1).topic(), "the clock's command batch");
+        assertEquals(1, pubs(p -> p.topic().endsWith("/cmd")).size(),
+                "no command traffic for the incapable design");
+    }
+
+    @Test
     void flagOnCyclesCommandPagesAtTheDwellUntilTheSlotEnds() throws Exception {
         newJob(true, new StubPagedService(), pagedConfig()).run();
 
@@ -423,6 +505,15 @@ class PanelScreenJobCommandTests {
         return new AircraftScreenConfig(ScreenType.NEARBY_AIRCRAFT, 1,
                 AircraftScreenConfig.AircraftDisplayMode.CLOSEST, null, 50, false,
                 AircraftScreenConfig.AircraftDisplayUnits.AVIATION, 100);
+    }
+
+    private static final String SINGLE_FRAME_DESIGN =
+            "{\"schemaVersion\":1,\"name\":\"T\",\"frames\":[{\"layers\":[]}]}";
+    private static final String TWO_FRAME_DESIGN =
+            "{\"schemaVersion\":1,\"name\":\"T\",\"frames\":[{\"layers\":[]},{\"layers\":[]}]}";
+
+    private static CustomScreenConfig customConfig(final String design) {
+        return new CustomScreenConfig(ScreenType.CUSTOM, 1, design);
     }
 
     private void fireLoaded(final int slot, final long uploadId) {

@@ -70,6 +70,7 @@ public class AdsbLolAircraftClient implements AircraftClient {
     }
 
     final LoadingCache<AdsbLolRequest, List<NearbyAircraft>> adsbLolNearbyCache;
+    final AdsbLolCacheLoader adsbLolCacheLoader;
 
     @Override
     public List<NearbyAircraft> getAircraft(final LatLon latLon, final int radiusNm, final boolean militaryOnly) {
@@ -85,12 +86,38 @@ public class AdsbLolAircraftClient implements AircraftClient {
     }
 
     /**
+     * Slot-start renders (CLOSEST/LIST, the RADAR first batch) fetch in the foreground
+     * and show that fetch's result: the SWR {@link #getAircraft} would serve the
+     * previous fetch's snapshot (revalidating only in the background), which is one
+     * rotation old for a screen whose key nothing else polls — visibly staler than
+     * the radar screen polling every 2 s. The result is written back into the cache,
+     * so subsequent reads (the radar refresh grid) start from it. A total provider
+     * failure degrades to the last good snapshot instead of blanking the screen; a
+     * genuinely empty sky also takes that path and shows the old sky one slot longer.
+     */
+    @Override
+    public List<NearbyAircraft> getAircraftFresh(final LatLon latLon, final int radiusNm, final boolean militaryOnly) {
+        final AdsbLolRequest request = new AdsbLolRequest(latLon, radiusNm, militaryOnly);
+        // Foreground load FIRST, cache only touched afterwards: any read of a
+        // refresh-stale entry (get, getIfPresent, asMap.get alike) schedules a
+        // background reload, which would double every slot-start fetch.
+        final List<NearbyAircraft> fresh = adsbLolCacheLoader.load(request);
+        if (fresh.isEmpty()) {
+            log.warn("adsb.lol foreground fetch failed for {}; keeping the last good snapshot", request);
+            final List<NearbyAircraft> lastGood = adsbLolNearbyCache.asMap().get(request);
+            return lastGood != null ? lastGood : List.of();
+        }
+        adsbLolNearbyCache.put(request, fresh);
+        return fresh;
+    }
+
+    /**
      * Loader for the stale-while-revalidate cache. {@link #load} is the original
      * fetch-with-retry body; Caffeine runs {@code refreshAfterWrite} reloads through
      * {@code asyncReload} on the cache's executor (never the reading thread), so a
      * reload failure simply keeps the previous value until the entry expires.
      */
-    public static final class AdsbLolCacheLoader implements CacheLoader<AdsbLolRequest, List<NearbyAircraft>> {
+    public static class AdsbLolCacheLoader implements CacheLoader<AdsbLolRequest, List<NearbyAircraft>> {
 
         private static final double EARTH_RADIUS_NM = 3440.065;
 

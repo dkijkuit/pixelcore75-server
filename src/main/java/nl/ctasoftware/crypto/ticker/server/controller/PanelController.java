@@ -15,6 +15,7 @@ import nl.ctasoftware.crypto.ticker.server.service.image.ImageBroadcasterService
 import nl.ctasoftware.crypto.ticker.server.service.job.Px75PanelJobScheduler;
 import nl.ctasoftware.crypto.ticker.server.service.panel.Px75PanelConfigService;
 import nl.ctasoftware.crypto.ticker.server.service.panel.Px75PanelService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.custom.CustomScreenLibraryService;
 import nl.ctasoftware.crypto.ticker.server.service.user.Px75UserDetailsService;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -37,6 +38,7 @@ public class PanelController {
     final ImageBroadcasterService imageBroadcasterService;
     final Px75PanelJobScheduler px75PanelJobScheduler;
     final SseTicketService sseTicketService;
+    final CustomScreenLibraryService customScreenLibraryService;
 
     @PostMapping("register")
     Px75PanelDto register(@AuthenticationPrincipal Px75User user, @RequestBody CreatePanelRequest dto) {
@@ -92,6 +94,9 @@ public class PanelController {
         }
 
         log.info("Saving panel config for panel {}", px75Panel.getSerial());
+
+        // 400 on invalid inline designs and on missing/inaccessible library references
+        customScreenLibraryService.validateRotation(userDetails, panelConfig.getScreensConfig());
 
         final Px75PanelConfig px75PanelConfig = px75PanelConfigService.save(panelConfig);
         px75PanelJobScheduler.schedulePanelScreenJob(px75Panel.getPanelId(), px75Panel.getUserId());

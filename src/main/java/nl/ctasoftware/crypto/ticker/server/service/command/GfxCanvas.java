@@ -166,41 +166,11 @@ final class GfxCanvas {
         }
     }
 
-    /** Plain rectangle fill (region snapshot/restore, not a GFX primitive — no w/h quirks). */
+    /** Plain rectangle fill (BLINK's dark phase, not a GFX primitive — no w/h quirks). */
     void fillRegionDirect(final int x, final int y, final int w, final int h, final int color) {
         for (int yy = Math.max(0, y); yy < Math.min(HEIGHT, y + h); yy++) {
             for (int xx = Math.max(0, x); xx < Math.min(WIDTH, x + w); xx++) {
                 pixels[yy * WIDTH + xx] = color & 0xFFFF;
-            }
-        }
-    }
-
-    /** Snapshot of a rectangle of this canvas (row-major, clipped to the canvas). */
-    int[] snapshotRegion(final int x, final int y, final int w, final int h) {
-        final int x0 = Math.max(0, x);
-        final int y0 = Math.max(0, y);
-        final int x1 = Math.min(WIDTH, x + w);
-        final int y1 = Math.min(HEIGHT, y + h);
-        final int[] snap = new int[Math.max(0, x1 - x0) * Math.max(0, y1 - y0)];
-        int out = 0;
-        for (int yy = y0; yy < y1; yy++) {
-            for (int xx = x0; xx < x1; xx++) {
-                snap[out++] = pixels[yy * WIDTH + xx];
-            }
-        }
-        return snap;
-    }
-
-    /** Restores a {@link #snapshotRegion} rectangle in place (clipped the same way). */
-    void restoreRegion(final int x, final int y, final int w, final int h, final int[] snapshot) {
-        final int x0 = Math.max(0, x);
-        final int y0 = Math.max(0, y);
-        final int x1 = Math.min(WIDTH, x + w);
-        final int y1 = Math.min(HEIGHT, y + h);
-        int in = 0;
-        for (int yy = y0; yy < y1; yy++) {
-            for (int xx = x0; xx < x1; xx++) {
-                pixels[yy * WIDTH + xx] = snapshot[in++];
             }
         }
     }
