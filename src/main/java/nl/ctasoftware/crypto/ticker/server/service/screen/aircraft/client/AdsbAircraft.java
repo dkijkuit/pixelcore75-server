@@ -5,7 +5,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 
 /**
- * One aircraft as returned by the adsb.lol v2 endpoints. Fields are wrappers because the
+ * One aircraft as returned by the readsb-style v2 endpoints (adsb.lol,
+ * opendata.adsb.fi — identical JSON dialect; adsb.fi additionally carries
+ * {@code desc}, the manufacturer+model string). Fields are wrappers because the
  * API omits/nulls any value it does not have. {@code alt_baro} is polymorphic: a number,
  * or the string {@code "ground"} when the aircraft is on the ground.
  */
@@ -15,6 +17,7 @@ public record AdsbAircraft(
         String flight,
         String r,
         String t,
+        String desc,
         @JsonProperty("alt_baro") JsonNode altBaro,
         Double gs,
         Double track,

@@ -9,5 +9,6 @@ public enum ScreenType {
     CLOCK,
     DATE,
     FORMULA1,
-    NEARBY_AIRCRAFT
+    NEARBY_AIRCRAFT,
+    CUSTOM
 }
