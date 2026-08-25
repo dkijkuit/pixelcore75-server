@@ -4,7 +4,7 @@ package nl.ctasoftware.crypto.ticker.server.model.panel.config;
  * A screen config that can render as a frame stream played back through the panel's
  * animation slots (ANIM/ANIF/ANIP protocol).
  */
-public sealed interface FrameScreenConfig extends ScreenConfig permits AnimationScreenConfig, AircraftScreenConfig, CustomScreenConfig {
+public sealed interface FrameScreenConfig extends ScreenConfig permits AnimationScreenConfig, AircraftScreenConfig, CustomScreenConfig, SpotifyScreenConfig {
 
     int MIN_FRAME_DELAY_MS = 10;
 

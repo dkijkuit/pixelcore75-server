@@ -41,6 +41,9 @@ public class SecurityConfig {
                 .exceptionHandling(configurer -> configurer.authenticationEntryPoint(unauthorizedHandler))
                 .authorizeHttpRequests(registry -> registry
                         .requestMatchers("/v1/auth/**").permitAll()
+                        // Browser redirect target from Spotify consent: no JWT on that
+                        // navigation; the PKCE state check (SpotifyOAuthService) covers it.
+                        .requestMatchers("/v1/spotify/oauth/callback").permitAll()
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)

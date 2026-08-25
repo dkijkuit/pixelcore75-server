@@ -10,5 +10,6 @@ public enum ScreenType {
     DATE,
     FORMULA1,
     NEARBY_AIRCRAFT,
+    SPOTIFY_NOW_PLAYING,
     CUSTOM
 }

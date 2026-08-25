@@ -11,11 +11,18 @@ import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
 import java.net.http.HttpClient;
+import java.time.Clock;
 import java.time.Duration;
 
 @Slf4j
 @Configuration
 public class ClientConfig {
+
+    /** Shared wall clock (injectable/test-freezable), UTC. */
+    @Bean
+    Clock clock() {
+        return Clock.systemUTC();
+    }
     @Bean
     RestClient coinGeckoRestClient(@Value("${pixelcore75.crypto.apikey}") final String apiKey, final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
         return RestClient.builder()
@@ -112,6 +119,27 @@ public class ClientConfig {
                 .baseUrl("https://api.adsbdb.com/v0/")
                 .build();
     }
+
+    /** Spotify Web API (playback state, profile) — Bearer token added per request. */
+    @Bean
+    RestClient spotifyApiRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+        return RestClient.builder()
+                .requestFactory(timedJdkRequestFactory())
+                .requestInterceptor(noCacheRequestInterceptor)
+                .baseUrl("https://api.spotify.com/v1/")
+                .build();
+    }
+
+    /** Spotify accounts host (authorize page + token endpoint) — PKCE, no client secret. */
+    @Bean
+    RestClient spotifyAccountsRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+        return RestClient.builder()
+                .requestFactory(timedJdkRequestFactory())
+                .requestInterceptor(noCacheRequestInterceptor)
+                .baseUrl("https://accounts.spotify.com/")
+                .build();
+    }
+
 
     /**
      * The ADS-B APIs resolve to several ingress nodes of which some are intermittently

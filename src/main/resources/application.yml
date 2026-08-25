@@ -47,6 +47,17 @@ pixelcore75:
     client: espn
     apikey: ${SOCCER_API_KEY:}
     basePath: https://sports.core.api.espn.com/v2/sports/
+  spotify:
+    # OAuth PKCE app from the Spotify Developer Dashboard; empty = screen shows
+    # its "not connected" card. The redirect URI must match the dashboard entry.
+    client-id: ${SPOTIFY_CLIENT_ID:}
+    redirect-uri: ${SPOTIFY_REDIRECT_URI:http://localhost:8080/v1/spotify/oauth/callback}
+    # Where the OAuth callback bounces the browser back to (the SPA), with ?spotify=outcome.
+    post-connect-redirect: ${SPOTIFY_POST_CONNECT_REDIRECT:http://localhost:5173/}
+    # Live-refresh cadence for a playing slot (ms): each refresh re-fetches the
+    # playback state from the Web API. 5000 default; the API is rate-limited, so
+    # values much below ~2000 risk 429s on top of the added polling traffic.
+    refresh-ms: ${SPOTIFY_REFRESH_MS:2000}
 
   # ACMD v1 command encoding (plan §6): screens whose service implements
   # CommandScreenService publish a command batch to <serial>/cmd instead of frame

@@ -17,6 +17,7 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
         @JsonSubTypes.Type(value = DateScreenConfig.class, name = "DATE"),
         @JsonSubTypes.Type(value = Formula1ScreenConfig.class, name = "FORMULA1"),
         @JsonSubTypes.Type(value = AircraftScreenConfig.class, name = "NEARBY_AIRCRAFT"),
+        @JsonSubTypes.Type(value = SpotifyScreenConfig.class, name = "SPOTIFY_NOW_PLAYING"),
         @JsonSubTypes.Type(value = CustomScreenConfig.class, name = "CUSTOM")
 })
 public sealed interface ScreenConfig permits ClockScreenConfig, CryptoScreenConfig, DateScreenConfig, Formula1ScreenConfig, FrameScreenConfig, ImageScreenConfig, SoccerMatchScreenConfig, WeatherScreenConfig {

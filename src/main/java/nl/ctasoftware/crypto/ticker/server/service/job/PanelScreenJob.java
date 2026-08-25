@@ -22,6 +22,7 @@ import nl.ctasoftware.crypto.ticker.server.service.screen.date.DateScreenService
 import nl.ctasoftware.crypto.ticker.server.service.screen.formula1.Formula1ScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.image.ImageScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.SoccerMatchService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.SpotifyScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.weather.WeatherScreenService;
 import org.eclipse.paho.client.mqttv3.IMqttClient;
 import org.eclipse.paho.client.mqttv3.MqttException;
@@ -284,6 +285,7 @@ public class PanelScreenJob implements ReschedulableJob {
             case DateScreenConfig i -> ((DateScreenService) screenService).renderScreen(i);
             case Formula1ScreenConfig i -> ((Formula1ScreenService) screenService).renderScreen(i);
             case AircraftScreenConfig a -> ((AircraftScreenService) screenService).renderScreen(a);
+            case SpotifyScreenConfig s -> ((SpotifyScreenService) screenService).renderScreen(s);
             case AnimationScreenConfig a -> ((AnimationScreenService) screenService).renderScreen(a);
             case CustomScreenConfig c -> ((CustomScreenService) screenService).renderScreen(c);
         };
