@@ -198,6 +198,22 @@ public class PanelScreenJob implements ReschedulableJob {
             return Optional.of(Duration.ofSeconds(30));
         }
 
+        final List<? extends ScreenConfig> activeScreens =
+                screensConfig.stream().filter(s -> !s.disabled()).toList();
+        if (activeScreens.isEmpty()) {
+            log.warn("----> All screens of panel {} are disabled, not scheduling screen jobs", panelConfig.getPanelId());
+            final BufferedImage missingConfigImage =
+                    imageService.imageToBufferedImage("assets/images/no_config_found.png");
+            try {
+                sendImageToPanel(missingConfigImage);
+                scaleImageAndPublish(missingConfigImage);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+
+            return Optional.empty();
+        }
+
         if (!running.get()) {
             log.warn("Not re-scheduling screen jobs for panel, because it's ending: {}", panelConfig.getPanelId());
         }
@@ -209,13 +225,13 @@ public class PanelScreenJob implements ReschedulableJob {
         }
 
         final int previewGeneration = bumpPreviewGeneration();
-        final int screenIdx = getScreenIndex(screensConfig);
-        final ScreenConfig screenConfig = screensConfig.get(screenIdx);
+        final int screenIdx = getScreenIndex(activeScreens);
+        final ScreenConfig screenConfig = activeScreens.get(screenIdx);
 
         long durationMillis;
         try {
             log.debug("----> Next screen job for panel: {}", panelConfig.getPanelId());
-            renderScreen(screenConfig, screensConfig, previewGeneration, screenIdx);
+            renderScreen(screenConfig, activeScreens, previewGeneration, screenIdx);
         } catch (Exception e) {
             log.error("Error rendering screen job for panel: {}", panelConfig.getPanelId(), e);
         }
@@ -229,7 +245,7 @@ public class PanelScreenJob implements ReschedulableJob {
             log.debug("----> Job for panel {} interrupted before staging, skipping", panelConfig.getPanelId());
             return Optional.empty();
         }
-        final long stagedMillis = stageNextAnimation(screenIdx, screensConfig);
+        final long stagedMillis = stageNextAnimation(screenIdx, activeScreens);
         durationMillis = Math.max(MIN_ANIMATION_SLOT_MILLIS,
                 Duration.ofSeconds(screenConfig.durationSeconds()).toMillis() - stagedMillis);
 

@@ -5,6 +5,7 @@ import nl.ctasoftware.crypto.ticker.server.model.panel.config.SpotifyScreenConfi
 import nl.ctasoftware.crypto.ticker.server.service.command.AcmdMirror;
 import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.client.SpotifyAlbumArtClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.client.SpotifyPlaybackClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.client.SpotifyPlaybackClient.SpotifyPlayback;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -46,15 +48,16 @@ class SpotifyCommandRefreshTests {
                 .deriveFont(5f);
         client = mock(SpotifyPlaybackClient.class);
         service = new SpotifyScreenService(new PaintToolsService(null, null, ledBoard),
-                ledBoard, cgPixel, client, SpotifyScreenService.DEFAULT_REFRESH_MS);
+                ledBoard, cgPixel, client, mock(SpotifyAlbumArtClient.class),
+                SpotifyScreenService.DEFAULT_REFRESH_MS);
         config = new SpotifyScreenConfig(ScreenType.SPOTIFY_NOW_PLAYING, 20, 250, true);
     }
 
     private static SpotifyPlayback playing(final String title, final long progressMs, final long durationMs) {
-        return new SpotifyPlayback(true, true, title, "Artist", progressMs, durationMs, Instant.now());
+        return new SpotifyPlayback(true, true, title, "Artist", null, progressMs, durationMs, Instant.now());
     }
 
-    /** Green (Spotify bar) pixels in the bar band — 4 rows tall, one per bar-width column. */
+    /** Green (Spotify bar) pixels in the bar band — one per bar-width column, 2 rows tall. */
     private static int barGreenPixels(final byte[] batch) {
         final BufferedImage frame = AcmdMirror.toBufferedImage(AcmdMirror.parse(batch).baseFrame());
         int green = 0;
@@ -82,23 +85,25 @@ class SpotifyCommandRefreshTests {
 
         final CommandScreenService.RefreshStream refresh = service.renderCommandRefresh(config);
         assertNotNull(refresh);
-        assertEquals(SpotifyScreenService.DEFAULT_REFRESH_MS, refresh.refreshMs());
-        assertEquals(4 * 16, barGreenPixels(refresh.firstBatch()), "60s/240s → 16px bar");
+        assertEquals(SpotifyScreenService.RENDER_TICK_MS, refresh.refreshMs(),
+                "the time line ticks per second, not per (slower) fetch cadence");
+        assertEquals(2 * 16, barGreenPixels(refresh.firstBatch()), "60s/240s → 16px bar");
     }
 
     @Test
-    void refreshBatchesAdvanceTheBarFromFreshFetches() {
-        when(client.getCurrentlyPlaying()).thenReturn(
-                playing("Song", 60_000, 240_000),
-                playing("Song", 120_000, 240_000));
+    void refreshBatchesAdvanceTheBarFromBudgetedFetches() {
+        when(client.getCurrentlyPlaying()).thenReturn(playing("Song", 60_000, 240_000));
+        when(client.getCurrentlyPlaying(SpotifyScreenService.DEFAULT_REFRESH_MS))
+                .thenReturn(playing("Song", 120_000, 240_000));
 
         final CommandScreenService.RefreshStream refresh = service.renderCommandRefresh(config);
         final byte[] next = refresh.nextBatches().get();
 
-        // The supplier renders one interval ahead of its grid point (pipelined
-        // lead): 120s + REFRESH_MS projected → 33px, not the fetch-time 32px.
-        assertEquals(4 * 33, barGreenPixels(next), "120s+5s projected / 240s → 33px bar");
+        // The supplier renders one tick ahead of its grid point (pipelined
+        // lead): 120s + 1s projected → 32px, not the fetch-time 32px flat.
+        assertEquals(2 * 32, barGreenPixels(next), "120s+1s projected / 240s → 32px bar");
         assertTrue(barGreenPixels(next) > barGreenPixels(refresh.firstBatch()));
+        verify(client).getCurrentlyPlaying(SpotifyScreenService.DEFAULT_REFRESH_MS);
     }
 
     @Test
@@ -106,7 +111,7 @@ class SpotifyCommandRefreshTests {
         // Paused keeps the live stream: play may resume mid-slot and the refresh
         // grid should pick it up within one interval.
         when(client.getCurrentlyPlaying()).thenReturn(
-                new SpotifyPlayback(true, false, "Song", "Artist", 60_000, 240_000, Instant.now()));
+                new SpotifyPlayback(true, false, "Song", "Artist", null, 60_000, 240_000, Instant.now()));
         assertNotNull(service.renderCommandRefresh(config));
 
         when(client.getCurrentlyPlaying()).thenReturn(SpotifyPlayback.idle());

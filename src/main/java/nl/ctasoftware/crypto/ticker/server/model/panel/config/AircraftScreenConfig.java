@@ -10,7 +10,8 @@ public record AircraftScreenConfig(
         int radiusNm,
         boolean militaryOnly,
         AircraftDisplayUnits units,
-        int frameDelayMs
+        int frameDelayMs,
+        boolean disabled
 ) implements FrameScreenConfig {
 
     public enum AircraftDisplayMode {
@@ -23,6 +24,14 @@ public record AircraftScreenConfig(
     public enum AircraftDisplayUnits {
         AVIATION,
         METRIC
+    }
+
+    public AircraftScreenConfig(final ScreenType screenType, final int durationSeconds,
+                                final AircraftDisplayMode displayMode, final LatLon latLon,
+                                final int radiusNm, final boolean militaryOnly,
+                                final AircraftDisplayUnits units, final int frameDelayMs) {
+        this(screenType, durationSeconds, displayMode, latLon, radiusNm, militaryOnly,
+                units, frameDelayMs, false);
     }
 
     @Override

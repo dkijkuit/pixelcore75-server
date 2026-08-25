@@ -135,7 +135,7 @@ public class CustomScreenLibraryService implements CustomScreenResolver {
         }
         return customScreenRepository.findById(config.customScreenId())
                 .map(entry -> new CustomScreenConfig(ScreenType.CUSTOM, config.durationSeconds(),
-                        entry.getDesign()))
+                        null, entry.getDesign(), config.disabled()))
                 .orElse(null);
     }
 

@@ -24,4 +24,6 @@ public sealed interface ScreenConfig permits ClockScreenConfig, CryptoScreenConf
     ScreenType screenType();
 
     int durationSeconds();
+
+    boolean disabled();
 }

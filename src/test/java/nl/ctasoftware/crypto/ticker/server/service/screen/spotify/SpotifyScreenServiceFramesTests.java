@@ -3,6 +3,7 @@ package nl.ctasoftware.crypto.ticker.server.service.screen.spotify;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenType;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.SpotifyScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.client.SpotifyAlbumArtClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.client.SpotifyPlaybackClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.client.SpotifyPlaybackClient.SpotifyPlayback;
 import org.junit.jupiter.api.BeforeEach;
@@ -41,14 +42,15 @@ class SpotifyScreenServiceFramesTests {
                 .deriveFont(5f);
         client = mock(SpotifyPlaybackClient.class);
         service = new SpotifyScreenService(new PaintToolsService(null, null, ledBoard),
-                ledBoard, cgPixel, client, SpotifyScreenService.DEFAULT_REFRESH_MS);
+                ledBoard, cgPixel, client, mock(SpotifyAlbumArtClient.class),
+                SpotifyScreenService.DEFAULT_REFRESH_MS);
         config = new SpotifyScreenConfig(ScreenType.SPOTIFY_NOW_PLAYING, 10, 250, true);
     }
 
     private SpotifyPlayback playing(final long progressMs, final long durationMs) {
         // Short title/artist: nothing marquees, so the time band below the artist
         // line can only change through the time text itself.
-        return new SpotifyPlayback(true, true, "T", "A", progressMs, durationMs, Instant.now());
+        return new SpotifyPlayback(true, true, "T", "A", null, progressMs, durationMs, Instant.now());
     }
 
     /** Vertical band of an image (the time-line rows sit above the progress bar). */
@@ -74,14 +76,15 @@ class SpotifyScreenServiceFramesTests {
         // The elapsed/total line ("0:05/4:00" → ~"0:14/4:00") must advance across
         // the slot: with static title/artist, the time band (between the artist
         // line and the progress bar) can only differ through the time text.
-        assertFalse(Arrays.equals(band(first, 20, SpotifyScreenService.PROGRESS_BAR_Y),
-                band(last, 20, SpotifyScreenService.PROGRESS_BAR_Y)),
+        assertFalse(Arrays.equals(
+                band(first, SpotifyScreenService.ARTIST_BASELINE_Y, SpotifyScreenService.PROGRESS_BAR_Y),
+                band(last, SpotifyScreenService.ARTIST_BASELINE_Y, SpotifyScreenService.PROGRESS_BAR_Y)),
                 "elapsed-time text must tick, not show the slot-start snapshot");
     }
 
     @Test
     void pausedPlaybackFreezesBarAndTimeLine() {
-        final SpotifyPlayback paused = new SpotifyPlayback(true, false, "T", "A",
+        final SpotifyPlayback paused = new SpotifyPlayback(true, false, "T", "A", null,
                 90_000, 240_000, Instant.now());
         when(client.getCurrentlyPlaying()).thenReturn(paused);
         final var frames = service.renderFrames(config);

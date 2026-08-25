@@ -9,9 +9,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
-import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneId;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -33,34 +31,10 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
  */
 class SpotifyPlaybackClientRetryTests {
 
-    private static final String PLAYER_URL = "https://api.spotify.com/v1/me/player?additional_types=track";
+    private static final String PLAYER_URL = "https://api.spotify.com/v1/me/player?additional_types=track,episode";
     private static final String PLAYING_BODY =
             "{\"is_playing\":true,\"progress_ms\":60000,\"item\":"
                     + "{\"name\":\"Song\",\"artists\":[{\"name\":\"Artist\"}],\"duration_ms\":240000}}";
-
-    /** Settable clock: every instant() read returns {@code now} — no call-index accounting. */
-    static final class MutableClock extends Clock {
-        Instant now;
-
-        MutableClock(final Instant start) {
-            this.now = start;
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneId.of("UTC");
-        }
-
-        @Override
-        public Clock withZone(final ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
-        }
-    }
 
     private SpotifyOAuthService oauth;
     private MockRestServiceServer server;

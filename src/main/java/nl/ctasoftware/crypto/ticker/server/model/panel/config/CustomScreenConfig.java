@@ -18,7 +18,8 @@ public record CustomScreenConfig(
         ScreenType screenType,
         int durationSeconds,
         Long customScreenId,
-        String design
+        String design,
+        boolean disabled
 ) implements FrameScreenConfig {
 
     public CustomScreenConfig {
@@ -30,7 +31,12 @@ public record CustomScreenConfig(
 
     /** Legacy inline form: {@code {screenType, durationSeconds, design}}. */
     public CustomScreenConfig(final ScreenType screenType, final int durationSeconds, final String design) {
-        this(screenType, durationSeconds, null, design);
+        this(screenType, durationSeconds, null, design, false);
+    }
+
+    public CustomScreenConfig(final ScreenType screenType, final int durationSeconds,
+                              final Long customScreenId, final String design) {
+        this(screenType, durationSeconds, customScreenId, design, false);
     }
 
     @JsonCreator(mode = JsonCreator.Mode.DELEGATING)
@@ -46,6 +52,14 @@ public record CustomScreenConfig(
         if (duration == null || !duration.canConvertToInt() || duration.asInt() < 1) {
             throw new IllegalArgumentException("durationSeconds must be an integer >= 1");
         }
+        boolean disabled = false;
+        final JsonNode disabledNode = node.get("disabled");
+        if (disabledNode != null && !disabledNode.isNull()) {
+            if (!disabledNode.isBoolean()) {
+                throw new IllegalArgumentException("disabled must be a boolean");
+            }
+            disabled = disabledNode.asBoolean();
+        }
         final JsonNode ref = node.get("customScreenId");
         final JsonNode design = node.get("design");
         if (ref != null && !ref.isNull() && design != null && !design.isNull()) {
@@ -55,13 +69,13 @@ public record CustomScreenConfig(
             if (!ref.canConvertToLong() || ref.asLong() < 1) {
                 throw new IllegalArgumentException("customScreenId must be a positive integer");
             }
-            return new CustomScreenConfig(ScreenType.CUSTOM, duration.asInt(), ref.asLong(), null);
+            return new CustomScreenConfig(ScreenType.CUSTOM, duration.asInt(), ref.asLong(), null, disabled);
         }
         if (design != null && !design.isNull()) {
             if (!design.isTextual()) {
                 throw new IllegalArgumentException("design must be a string");
             }
-            return new CustomScreenConfig(ScreenType.CUSTOM, duration.asInt(), null, design.asText());
+            return new CustomScreenConfig(ScreenType.CUSTOM, duration.asInt(), null, design.asText(), disabled);
         }
         throw new IllegalArgumentException("CUSTOM screen needs either customScreenId or design");
     }
