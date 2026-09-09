@@ -12,7 +12,7 @@ import nl.ctasoftware.crypto.ticker.server.model.dto.UpdatePanelDetailsRequest;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.Px75PanelConfig;
 import nl.ctasoftware.crypto.ticker.server.security.SseTicketService;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageBroadcasterService;
-import nl.ctasoftware.crypto.ticker.server.service.job.Px75PanelJobScheduler;
+import nl.ctasoftware.crypto.ticker.server.service.job.PanelRotationControl;
 import nl.ctasoftware.crypto.ticker.server.service.panel.Px75PanelConfigService;
 import nl.ctasoftware.crypto.ticker.server.service.panel.Px75PanelService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.custom.CustomScreenLibraryService;
@@ -36,7 +36,7 @@ public class PanelController {
     final Px75PanelService px75PanelService;
     final Px75PanelConfigService px75PanelConfigService;
     final ImageBroadcasterService imageBroadcasterService;
-    final Px75PanelJobScheduler px75PanelJobScheduler;
+    final PanelRotationControl panelRotationControl;
     final SseTicketService sseTicketService;
     final CustomScreenLibraryService customScreenLibraryService;
 
@@ -49,7 +49,7 @@ public class PanelController {
         var created = px75PanelService.addPx75Panel(new Px75Panel(null, userId, dto.serial(), dto.clientMac(), dto.name(),
                 Px75PanelType.valueOf(dto.panelType())));
 
-        px75PanelJobScheduler.schedulePanelScreenJob(created.getPanelId(), created.getUserId());
+        panelRotationControl.schedulePanelScreenJob(created.getSerial());
 
         return Px75PanelDto.from(created, user.getUsername());
     }
@@ -99,7 +99,7 @@ public class PanelController {
         customScreenLibraryService.validateRotation(userDetails, panelConfig.getScreensConfig());
 
         final Px75PanelConfig px75PanelConfig = px75PanelConfigService.save(panelConfig);
-        px75PanelJobScheduler.schedulePanelScreenJob(px75Panel.getPanelId(), px75Panel.getUserId());
+        panelRotationControl.schedulePanelScreenJob(px75Panel.getSerial());
 
         return px75PanelConfig;
     }
@@ -146,11 +146,20 @@ public class PanelController {
                 ? px75PanelService.getPx75Panel(panelId)
                 : px75PanelService.getPx75PanelForUser(user.getId(), panelId);
 
+        final String oldSerial = existingPanel.getSerial();
         existingPanel.setName(updatePanelDetailsRequest.name());
         existingPanel.setPanelType(updatePanelDetailsRequest.panelType());
         existingPanel.setSerial(updatePanelDetailsRequest.serial());
         existingPanel.setClientMac(updatePanelDetailsRequest.clientMac());
 
-        return ResponseEntity.ok(px75PanelService.updatePx75Panel(existingPanel));
+        final Px75Panel saved = px75PanelService.updatePx75Panel(existingPanel);
+
+        // A serial change must move the rotation to the new topic (latent bug fixed with the
+        // JobRunr swap: the old serial's rotation dies, the new serial's starts immediately).
+        if (!saved.getSerial().equals(oldSerial)) {
+            panelRotationControl.onSerialChanged(oldSerial, saved.getSerial());
+        }
+
+        return ResponseEntity.ok(saved);
     }
 }

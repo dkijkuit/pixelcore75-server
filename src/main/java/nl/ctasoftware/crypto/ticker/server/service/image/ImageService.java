@@ -44,12 +44,18 @@ public class ImageService {
         if (img.getWidth() != W || img.getHeight() != H)
             throw new IllegalArgumentException("Image must be " + W + "x" + H);
 
+        // One bulk raster fetch instead of 2048 individual getRGB(x, y) calls (plan §7
+        // perf 3) — same output, pinned by the parity tests.
+        final int[] pixels = new int[W * H];
+        img.getRGB(0, 0, W, H, pixels, 0, W);
+
         byte[] out = new byte[FRAME_BYTES];
         int idx = 0;
 
         for (int y = 0; y < H; y++) {
+            final int rowStart = y * W;
             for (int x = 0; x < W; x++) {
-                int argb = img.getRGB(x, y);
+                int argb = pixels[rowStart + x];
                 int rgb565 = getRgb565(alphaThreshold, bgRGB, argb);
 
                 out[idx++] = (byte) (rgb565 & 0xFF);         // low byte

@@ -34,7 +34,7 @@ final class UploadIdHasher {
         header[3] = (byte) (frameCount >> 24);
         header[4] = (byte) frameDelayMs;
         header[5] = (byte) (frameDelayMs >> 8);
-        header[6] = (byte) (flags & ~(PanelScreenJob.ANIM_FLAG_STAGE_ONLY | PanelScreenJob.ANIM_CODEC_MASK));
+        header[6] = (byte) (flags & ~(AnimationTransport.ANIM_FLAG_STAGE_ONLY | AnimationTransport.ANIM_CODEC_MASK));
         digest.update(header);
         for (final byte[] payload : framePayloads) {
             digest.update(payload);

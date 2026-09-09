@@ -23,34 +23,65 @@ public class ClientConfig {
     Clock clock() {
         return Clock.systemUTC();
     }
+
+    /**
+     * One shared connect/read-timed request factory for every upstream (plan §7 perf 1):
+     * without it a single hung provider stalls a rotation slot indefinitely. Reused by all
+     * RestClient beans — one HttpClient connection pool, not eight.
+     */
     @Bean
-    RestClient coinGeckoRestClient(@Value("${pixelcore75.crypto.apikey}") final String apiKey, final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+    JdkClientHttpRequestFactory timedJdkRequestFactory() {
+        return timedJdkRequestFactory(Duration.ofSeconds(3), Duration.ofSeconds(5));
+    }
+
+    public static JdkClientHttpRequestFactory timedJdkRequestFactory(final Duration connectTimeout, final Duration readTimeout) {
+        final HttpClient httpClient = HttpClient.newBuilder()
+                .connectTimeout(connectTimeout)
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .build();
+        final JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
+        requestFactory.setReadTimeout(readTimeout);
+        return requestFactory;
+    }
+
+    @Bean
+    RestClient coinGeckoRestClient(@Value("${pixelcore75.crypto.apikey}") final String apiKey,
+                                   final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                                   final JdkClientHttpRequestFactory timedJdkRequestFactory) {
         return RestClient.builder()
                 .baseUrl("https://api.coingecko.com/api/v3/coins/")
+                .requestFactory(timedJdkRequestFactory)
                     .defaultHeader("x-cg-demo-api-key", apiKey)
                 .requestInterceptor(noCacheRequestInterceptor)
                 .build();
     }
 
     @Bean
-    RestClient openMeteoRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+    RestClient openMeteoRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                                   final JdkClientHttpRequestFactory timedJdkRequestFactory) {
         return RestClient.builder()
+                .requestFactory(timedJdkRequestFactory)
                 .requestInterceptor(noCacheRequestInterceptor)
                 .baseUrl("https://api.open-meteo.com/v1/")
                 .build();
     }
 
     @Bean
-    RestClient espnSiteRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+    RestClient espnSiteRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                                  final JdkClientHttpRequestFactory timedJdkRequestFactory) {
         return RestClient.builder()
+                .requestFactory(timedJdkRequestFactory)
                 .requestInterceptor(noCacheRequestInterceptor)
                 .baseUrl("http://site.api.espn.com/apis/site/v2/sports/")
                 .build();
     }
 
     @Bean
-    RestClient espnCoreApiRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor, @Value("${pixelcore75.soccer.basePath}") final String basePath) {
+    RestClient espnCoreApiRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                                     @Value("${pixelcore75.soccer.basePath}") final String basePath,
+                                     final JdkClientHttpRequestFactory timedJdkRequestFactory) {
         return RestClient.builder()
+                .requestFactory(timedJdkRequestFactory)
                 .requestInterceptor(noCacheRequestInterceptor)
                 .defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
                 .baseUrl(basePath)
@@ -58,16 +89,20 @@ public class ClientConfig {
     }
 
     @Bean
-    RestClient sofascoreRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+    RestClient sofascoreRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                                   final JdkClientHttpRequestFactory timedJdkRequestFactory) {
         return RestClient.builder()
+                .requestFactory(timedJdkRequestFactory)
                 .requestInterceptor(noCacheRequestInterceptor)
                 .baseUrl("https://www.sofascore.com/api/v1/")
                 .build();
     }
 
     @Bean
-    RestClient jolpiRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+    RestClient jolpiRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                               final JdkClientHttpRequestFactory timedJdkRequestFactory) {
         return RestClient.builder()
+                .requestFactory(timedJdkRequestFactory)
                 .requestInterceptor(noCacheRequestInterceptor)
                 .baseUrl("https://api.jolpi.ca/ergast/")
                 .build();
@@ -76,17 +111,20 @@ public class ClientConfig {
     @Bean
     RestClient sportsDbRestClient(
             RestClient.Builder builder,
-            @Value("${pixelcore75.soccer.apikey}") String apiKey
+            @Value("${pixelcore75.soccer.apikey}") String apiKey,
+            final JdkClientHttpRequestFactory timedJdkRequestFactory
     ) {
         return builder
+                .requestFactory(timedJdkRequestFactory)
                 .baseUrl("https://www.thesportsdb.com/api/v2/json")
                 .defaultHeader("X-API-KEY", apiKey) // V2 header auth
                 .build();
     }
 
     @Bean
-    RestClient adsbLolRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
-        return aircraftApiRestClient("https://api.adsb.lol/v2/", noCacheRequestInterceptor);
+    RestClient adsbLolRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                                 final JdkClientHttpRequestFactory timedJdkRequestFactory) {
+        return aircraftApiRestClient("https://api.adsb.lol/v2/", noCacheRequestInterceptor, timedJdkRequestFactory);
     }
 
     /**
@@ -97,13 +135,15 @@ public class ClientConfig {
      * differences (adsb.lol ingress rate-limits with 429s or drops nodes entirely).
      */
     @Bean
-    RestClient adsbFiRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
-        return aircraftApiRestClient("https://opendata.adsb.fi/api/v2/", noCacheRequestInterceptor);
+    RestClient adsbFiRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                                final JdkClientHttpRequestFactory timedJdkRequestFactory) {
+        return aircraftApiRestClient("https://opendata.adsb.fi/api/v2/", noCacheRequestInterceptor, timedJdkRequestFactory);
     }
 
-    private static RestClient aircraftApiRestClient(final String baseUrl, final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+    private static RestClient aircraftApiRestClient(final String baseUrl, final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                                                    final JdkClientHttpRequestFactory timedJdkRequestFactory) {
         return RestClient.builder()
-                .requestFactory(timedJdkRequestFactory())
+                .requestFactory(timedJdkRequestFactory)
                 .requestInterceptor(noCacheRequestInterceptor)
                 .defaultHeader(HttpHeaders.USER_AGENT, "pixelcore75")
                 .baseUrl(baseUrl)
@@ -111,9 +151,10 @@ public class ClientConfig {
     }
 
     @Bean
-    RestClient adsbdbRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+    RestClient adsbdbRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                                final JdkClientHttpRequestFactory timedJdkRequestFactory) {
         return RestClient.builder()
-                .requestFactory(timedJdkRequestFactory())
+                .requestFactory(timedJdkRequestFactory)
                 .requestInterceptor(noCacheRequestInterceptor)
                 .defaultHeader(HttpHeaders.USER_AGENT, "pixelcore75")
                 .baseUrl("https://api.adsbdb.com/v0/")
@@ -122,9 +163,10 @@ public class ClientConfig {
 
     /** Spotify Web API (playback state, profile) — Bearer token added per request. */
     @Bean
-    RestClient spotifyApiRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+    RestClient spotifyApiRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                                    final JdkClientHttpRequestFactory timedJdkRequestFactory) {
         return RestClient.builder()
-                .requestFactory(timedJdkRequestFactory())
+                .requestFactory(timedJdkRequestFactory)
                 .requestInterceptor(noCacheRequestInterceptor)
                 .baseUrl("https://api.spotify.com/v1/")
                 .build();
@@ -132,27 +174,12 @@ public class ClientConfig {
 
     /** Spotify accounts host (authorize page + token endpoint) — PKCE, no client secret. */
     @Bean
-    RestClient spotifyAccountsRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor) {
+    RestClient spotifyAccountsRestClient(final ClientHttpRequestInterceptor noCacheRequestInterceptor,
+                                         final JdkClientHttpRequestFactory timedJdkRequestFactory) {
         return RestClient.builder()
-                .requestFactory(timedJdkRequestFactory())
+                .requestFactory(timedJdkRequestFactory)
                 .requestInterceptor(noCacheRequestInterceptor)
                 .baseUrl("https://accounts.spotify.com/")
                 .build();
-    }
-
-
-    /**
-     * The ADS-B APIs resolve to several ingress nodes of which some are intermittently
-     * unreachable (TLS reset / hang): keep connect/read timeouts tight so a render
-     * slot never blocks on a dead node; clients rotate providers and degrade gracefully.
-     */
-    private static JdkClientHttpRequestFactory timedJdkRequestFactory() {
-        final HttpClient httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(3))
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build();
-        final JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
-        requestFactory.setReadTimeout(Duration.ofSeconds(5));
-        return requestFactory;
     }
 }

@@ -1,8 +1,6 @@
 package nl.ctasoftware.crypto.ticker.server.service.panel;
 
-import org.eclipse.paho.client.mqttv3.IMqttClient;
-import org.eclipse.paho.client.mqttv3.IMqttMessageListener;
-import org.eclipse.paho.client.mqttv3.MqttMessage;
+import nl.ctasoftware.crypto.ticker.server.service.mqtt.MqttTransport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -22,32 +20,31 @@ class AnimationLoadAckServiceTests {
 
     private static final String SERIAL = "TESTPANEL1";
 
-    private IMqttClient mqttClient;
+    private MqttTransport mqttTransport;
     private AnimationLoadAckService ackService;
-    private IMqttMessageListener loadedListener;
+    private MqttTransport.MqttMessageListener loadedListener;
 
     @BeforeEach
-    void setUp() throws Exception {
-        mqttClient = mock(IMqttClient.class);
-        ackService = new AnimationLoadAckService(mqttClient);
+    void setUp() {
+        mqttTransport = mock(MqttTransport.class);
+        ackService = new AnimationLoadAckService(mqttTransport);
 
-        final ArgumentCaptor<IMqttMessageListener> listenerCaptor =
-                ArgumentCaptor.forClass(IMqttMessageListener.class);
-        verify(mqttClient).subscribe(eq(AnimationLoadAckService.ANIM_LOADED_TOPIC_FILTER), listenerCaptor.capture());
+        final ArgumentCaptor<MqttTransport.MqttMessageListener> listenerCaptor =
+                ArgumentCaptor.forClass(MqttTransport.MqttMessageListener.class);
+        verify(mqttTransport).subscribe(eq(AnimationLoadAckService.ANIM_LOADED_TOPIC_FILTER), listenerCaptor.capture());
         loadedListener = listenerCaptor.getValue();
     }
 
-    private void deliverLoaded(final String serial, final int slot, final long uploadId) throws Exception {
-        final MqttMessage message = new MqttMessage(new byte[]{
+    private void deliverLoaded(final String serial, final int slot, final long uploadId) {
+        loadedListener.messageArrived(serial + "/anim/loaded", new byte[]{
                 'A', 'N', 'I', 'L',
                 (byte) slot,
                 (byte) uploadId, (byte) (uploadId >> 8), (byte) (uploadId >> 16), (byte) (uploadId >> 24)
         });
-        loadedListener.messageArrived(serial + "/anim/loaded", message);
     }
 
     @Test
-    void correlatedAckRecordsSlotMappingAndCompletesWaiter() throws Exception {
+    void correlatedAckRecordsSlotMappingAndCompletesWaiter() {
         ackService.arm(SERIAL, 42L);
         deliverLoaded(SERIAL, 3, 42L);
 
@@ -56,14 +53,14 @@ class AnimationLoadAckServiceTests {
     }
 
     @Test
-    void ackWithoutWaiterIsNotRecorded() throws Exception {
+    void ackWithoutWaiterIsNotRecorded() {
         deliverLoaded(SERIAL, 3, 42L);
 
         assertEquals(OptionalLong.empty(), ackService.ackedUploadId(SERIAL, 3));
     }
 
     @Test
-    void staleAckIsNotRecorded() throws Exception {
+    void staleAckIsNotRecorded() {
         ackService.arm(SERIAL, 7L);
         deliverLoaded(SERIAL, 3, 42L);
 
@@ -72,7 +69,7 @@ class AnimationLoadAckServiceTests {
     }
 
     @Test
-    void slotsAreRecordedIndependently() throws Exception {
+    void slotsAreRecordedIndependently() {
         ackService.arm(SERIAL, 5L);
         deliverLoaded(SERIAL, 2, 5L);
         assertTrue(ackService.awaitLoaded(SERIAL, 5L, Duration.ofMillis(100)));
@@ -83,37 +80,48 @@ class AnimationLoadAckServiceTests {
     }
 
     @Test
-    void overflowingTheBoundClearsEarlierEntries() throws Exception {
-        for (int i = 0; i <= AnimationLoadAckService.MAX_ACKED_SLOT_ENTRIES + 5; i++) {
+    void ackedSlotCacheIsSizeBoundedInsteadOfClearingWholesale() {
+        // Fill beyond the bound: Caffeine evicts entries (oldest first) instead of the old
+        // wholesale clear, so unaffected panels keep their cached content hashes.
+        final int total = AnimationLoadAckService.MAX_ACKED_SLOT_ENTRIES + 200;
+        for (int i = 0; i < total; i++) {
             final String serial = "PANEL-" + i;
             ackService.arm(serial, 1000L + i);
             deliverLoaded(serial, 0, 1000L + i);
         }
 
-        assertEquals(OptionalLong.empty(), ackService.ackedUploadId("PANEL-0", 0));
-        final int last = AnimationLoadAckService.MAX_ACKED_SLOT_ENTRIES + 5;
-        assertEquals(OptionalLong.of(1000L + last), ackService.ackedUploadId("PANEL-" + last, 0));
+        assertTrue(ackService.ackedUploadIdCacheSizeForTests() <= AnimationLoadAckService.MAX_ACKED_SLOT_ENTRIES,
+                "the cache must stay bounded");
+        // The most recent entries must survive an eviction storm.
+        assertEquals(OptionalLong.of(1000L + total - 1), ackService.ackedUploadId("PANEL-" + (total - 1), 0));
     }
 
     @Test
-    void downgradeWindowMakesPanelPreferRawUntilItExpires() throws Exception {
+    void downgradeWindowMakesPanelPreferRawUntilItExpires() {
         assertFalse(ackService.prefersRaw(SERIAL), "never-downgraded panels get v2 uploads");
         ackService.markDowngraded(SERIAL, Duration.ofMillis(20));
         assertTrue(ackService.prefersRaw(SERIAL));
         assertFalse(ackService.prefersRaw("OTHERPANEL"), "the downgrade is per-panel");
 
-        Thread.sleep(60);
+        try {
+            Thread.sleep(60);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
 
         assertFalse(ackService.prefersRaw(SERIAL), "after the window the server re-probes v2");
     }
 
     @Test
-    void downgradeMapOverflowClearsEarlierEntries() {
-        for (int i = 0; i <= AnimationLoadAckService.MAX_DOWNGRADED_PANELS + 5; i++) {
+    void downgradeCacheIsSizeBoundedInsteadOfClearingWholesale() {
+        final int total = AnimationLoadAckService.MAX_ACKED_SLOT_ENTRIES + 200;
+        for (int i = 0; i < total; i++) {
             ackService.markDowngraded("PANEL-" + i, Duration.ofHours(1));
         }
 
-        assertFalse(ackService.prefersRaw("PANEL-0"));
-        assertTrue(ackService.prefersRaw("PANEL-" + (AnimationLoadAckService.MAX_DOWNGRADED_PANELS + 5)));
+        assertTrue(ackService.downgradeCacheSizeForTests() <= AnimationLoadAckService.MAX_ACKED_SLOT_ENTRIES,
+                "the cache must stay bounded");
+        assertTrue(ackService.prefersRaw("PANEL-" + (total - 1)),
+                "the most recently downgraded panel stays on RAW");
     }
 }

@@ -6,9 +6,10 @@ import nl.ctasoftware.crypto.ticker.server.model.Px75Role;
 import nl.ctasoftware.crypto.ticker.server.model.Px75User;
 import nl.ctasoftware.crypto.ticker.server.repository.PanelConfigRepository;
 import nl.ctasoftware.crypto.ticker.server.repository.PanelRepository;
-import nl.ctasoftware.crypto.ticker.server.service.job.JobSchedulerService;
+import nl.ctasoftware.crypto.ticker.server.service.job.PanelRotationControl;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -17,6 +18,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -26,7 +28,7 @@ class Px75PanelServiceTests {
 
     @Mock PanelRepository panelRepository;
     @Mock PanelConfigRepository panelConfigRepository;
-    @Mock JobSchedulerService jobSchedulerService;
+    @Mock PanelRotationControl panelRotationControl;
 
     @InjectMocks Px75PanelService px75PanelService;
 
@@ -39,9 +41,12 @@ class Px75PanelServiceTests {
 
         px75PanelService.deletePanel(1L, owner);
 
-        verify(jobSchedulerService).stop("PANEL-1", true);
-        verify(panelRepository).deleteById(1L);
-        verify(panelConfigRepository).deleteById(1L);
+        // Ordering is the point: the rotation must be dead before the rows go, or it keeps
+        // publishing the deleted config on the serial topic.
+        final InOrder inOrder = inOrder(panelRotationControl, panelRepository, panelConfigRepository);
+        inOrder.verify(panelRotationControl).stopBeforeDelete("PANEL-1");
+        inOrder.verify(panelRepository).deleteById(1L);
+        inOrder.verify(panelConfigRepository).deleteById(1L);
     }
 
     @Test
@@ -54,7 +59,7 @@ class Px75PanelServiceTests {
                 org.springframework.web.server.ResponseStatusException.class,
                 () -> px75PanelService.deletePanel(1L, stranger));
 
-        verify(jobSchedulerService, never()).stop(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyBoolean());
+        verify(panelRotationControl, never()).stopBeforeDelete(org.mockito.ArgumentMatchers.anyString());
         verify(panelRepository, never()).deleteById(anyLong());
     }
 }

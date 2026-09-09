@@ -1,15 +1,19 @@
 package nl.ctasoftware.crypto.ticker.server.service.job;
 
 import nl.ctasoftware.crypto.ticker.server.model.Px75Panel;
+import nl.ctasoftware.crypto.ticker.server.model.Px75PanelType;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.CustomScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.Px75PanelConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenType;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageBroadcasterService;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageService;
+import nl.ctasoftware.crypto.ticker.server.service.mqtt.MqttTransport;
 import nl.ctasoftware.crypto.ticker.server.service.panel.AnimationLoadAckService;
-import org.eclipse.paho.client.mqttv3.IMqttClient;
-import org.eclipse.paho.client.mqttv3.MqttMessage;
+import nl.ctasoftware.crypto.ticker.server.service.panel.Px75PanelConfigService;
+import nl.ctasoftware.crypto.ticker.server.repository.PanelRepository;
+import nl.ctasoftware.crypto.ticker.server.service.screen.ScreenService;
+import org.jobrunr.scheduling.JobScheduler;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,13 +22,8 @@ import org.junit.jupiter.api.Test;
 import java.awt.image.BufferedImage;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.List;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -39,11 +38,11 @@ import static org.mockito.Mockito.when;
 
 /**
  * The rotation loop's disabled-screen handling, docker-free against a mocked MQTT
- * client: {@code disabled} entries stay in the config but are skipped by rendering,
+ * transport: {@code disabled} entries stay in the config but are skipped by rendering,
  * and a rotation whose entries are all disabled shows the no-config image without
- * re-scheduling (same observable behavior as a panel without any config).
+ * scheduling a successor (same observable behavior as a panel without any config).
  */
-class PanelScreenJobDisabledTests {
+class PanelRotationJobDisabledTests {
 
     private static final String SERIAL = "DISABLEDJOB1";
 
@@ -53,51 +52,65 @@ class PanelScreenJobDisabledTests {
 
     private record Pub(String topic, byte[] payload, boolean retained) {}
 
-    private IMqttClient mqttClient;
+    private MqttTransport mqttTransport;
+    private JobScheduler jobScheduler;
+    private RotationStateService rotationStateService;
     private ImageService imageService;
+    private PanelRepository panelRepository;
+    private Px75PanelConfigService panelConfigService;
+    private PanelRotationJob job;
     private final List<Pub> pubs = new CopyOnWriteArrayList<>();
     private final List<Integer> renderedDurations = new CopyOnWriteArrayList<>();
 
     @BeforeAll
     static void createScratchDir() throws Exception {
-        Files.createDirectories(Path.of("generated_images"));
+        Files.createDirectories(Path.of(PanelRotationControl.GENERATED_IMAGES_DIR));
     }
 
     @AfterAll
     static void deleteScratchFile() throws Exception {
-        Files.deleteIfExists(Path.of("generated_images", SERIAL + ".png"));
+        Files.deleteIfExists(Path.of(PanelRotationControl.GENERATED_IMAGES_DIR, SERIAL + ".png"));
     }
 
     @BeforeEach
-    void setUp() throws Exception {
-        mqttClient = mock(IMqttClient.class);
-        // AnimationLoadAckService subscribes on construction; a bare mock client is enough here
-        doAnswer(invocation -> {
-            final MqttMessage message = invocation.getArgument(1);
-            pubs.add(new Pub(invocation.getArgument(0), message.getPayload(), message.isRetained()));
-            return null;
-        }).when(mqttClient).publish(anyString(), any(MqttMessage.class));
+    void setUp() {
+        mqttTransport = mock(MqttTransport.class);
         doAnswer(invocation -> {
             pubs.add(new Pub(invocation.getArgument(0), invocation.getArgument(1),
                     invocation.getArgument(3)));
             return null;
-        }).when(mqttClient).publish(anyString(), any(byte[].class), anyInt(), anyBoolean());
+        }).when(mqttTransport).publish(anyString(), any(byte[].class), anyInt(), anyBoolean());
+
+        rotationStateService = new RotationStateService();
+        jobScheduler = mock(JobScheduler.class);
 
         imageService = mock(ImageService.class);
         when(imageService.scale(any(), anyInt(), anyInt())).thenAnswer(inv -> inv.getArgument(0));
         when(imageService.bufferedImageToBytes(any(), eq(0), eq(0))).thenReturn(new byte[4096]);
         when(imageService.imageToBufferedImage(anyString()))
                 .thenReturn(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+
+        panelRepository = mock(PanelRepository.class);
+        when(panelRepository.findBySerialIgnoreCase(SERIAL)).thenReturn(java.util.Optional.of(
+                new Px75Panel(1L, 1L, SERIAL, "00:00:00:00:00:00", "test", Px75PanelType.P_64_X_32)));
+        panelConfigService = mock(Px75PanelConfigService.class);
+        when(panelConfigService.getPanelConfig(1L)).thenAnswer(
+                invocation -> new Px75PanelConfig(1L, jobConfigs));
+
+        job = newJob(List.of(new RecordingCustomService()));
     }
 
-    @Test
-    void disabledScreensAreSkippedByTheRotation() throws Exception {
-        final PanelScreenJob job = newJob(List.of(inline(10, true), inline(5, false)));
+    private List<ScreenConfig> jobConfigs;
 
+    @Test
+    void disabledScreensAreSkippedByTheRotation() {
+        jobConfigs = List.of(inline(10, true), inline(5, false));
+
+        String jobId = rotationStateService.kick(SERIAL);
         for (int cycle = 0; cycle < 3; cycle++) {
-            final Optional<Duration> next = job.run();
-            assertTrue(next.isPresent());
-            assertEquals(Duration.ofSeconds(5), next.get(), "only the enabled screen's slot counts");
+            job.execute(SERIAL, jobId);
+            jobId = rotationStateService.stateFor(SERIAL).allowedJobId.get();
+            assertTrue(jobId != null, "a running rotation schedules its successor");
         }
 
         assertEquals(List.of(5, 5, 5), renderedDurations, "only the enabled screen ever renders");
@@ -105,16 +118,18 @@ class PanelScreenJobDisabledTests {
     }
 
     @Test
-    void allDisabledBehavesLikeNoConfig() throws Exception {
-        final PanelScreenJob job = newJob(List.of(inline(10, true), inline(20, true)));
+    void allDisabledBehavesLikeNoConfig() {
+        jobConfigs = List.of(inline(10, true), inline(20, true));
 
-        final Optional<Duration> next = job.run();
+        final String jobId = rotationStateService.kick(SERIAL);
+        job.execute(SERIAL, jobId);
 
-        assertTrue(next.isEmpty(), "nothing to schedule while every screen is disabled");
         assertTrue(renderedDurations.isEmpty(), "no screen service may render");
         assertEquals(1, baseTopicPubs().size(), "the no-config image is published instead");
         assertTrue(baseTopicPubs().get(0).retained());
         assertTrue(baseTopicPubs().get(0).payload().length > 0);
+        org.mockito.Mockito.verify(jobScheduler, org.mockito.Mockito.never())
+                .schedule(any(java.util.UUID.class), any(java.time.temporal.Temporal.class), any(org.jobrunr.jobs.lambdas.JobLambda.class));
     }
 
     /* ------------------------------ fixtures ------------------------------ */
@@ -123,15 +138,18 @@ class PanelScreenJobDisabledTests {
         return new CustomScreenConfig(ScreenType.CUSTOM, durationSeconds, null, STATIC_DESIGN, disabled);
     }
 
-    private PanelScreenJob newJob(final List<ScreenConfig> configs)
-            throws org.eclipse.paho.client.mqttv3.MqttException {
-        final Px75Panel px75Panel = mock(Px75Panel.class);
-        when(px75Panel.getSerial()).thenReturn(SERIAL);
-        final ConcurrentMap<String, AtomicInteger> previewGenerations = new ConcurrentHashMap<>();
-        return new PanelScreenJob(px75Panel, new Px75PanelConfig(1L, configs),
-                List.of(new RecordingCustomService()), imageService, mqttClient,
-                mock(ImageBroadcasterService.class), new AnimationLoadAckService(mqttClient),
-                previewGenerations, false);
+    private PanelRotationJob newJob(final List<ScreenService<? extends ScreenConfig>> services) {
+        final ScreenServices screenServices = new ScreenServices(services);
+        final AnimationLoadAckService ackService = new AnimationLoadAckService(mqttTransport);
+        final RotationPlanner planner = new RotationPlanner(config -> config);
+        final AnimationTransport transport = new AnimationTransport(
+                imageService, ackService, screenServices, rotationStateService, mqttTransport, false);
+        final PreviewStreamer previewStreamer = new PreviewStreamer(
+                imageService, mock(ImageBroadcasterService.class), rotationStateService);
+        final CommandPublisher commandPublisher = new CommandPublisher(mqttTransport, rotationStateService, previewStreamer);
+        return new PanelRotationJob(panelRepository, panelConfigService, screenServices, planner,
+                transport, commandPublisher, previewStreamer, rotationStateService,
+                jobScheduler, mqttTransport, imageService, false);
     }
 
     private List<Pub> baseTopicPubs() {
@@ -147,9 +165,9 @@ class PanelScreenJobDisabledTests {
         }
 
         @Override
-        public Optional<BufferedImage> renderScreen(final CustomScreenConfig screenConfig) {
+        public java.util.Optional<BufferedImage> renderScreen(final CustomScreenConfig screenConfig) {
             renderedDurations.add(screenConfig.durationSeconds());
-            return Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+            return java.util.Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
         }
 
         @Override

@@ -2,13 +2,14 @@ package nl.ctasoftware.crypto.ticker.server.service.panel;
 
 import jakarta.persistence.EntityNotFoundException;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import nl.ctasoftware.crypto.ticker.server.model.Px75Panel;
 import nl.ctasoftware.crypto.ticker.server.model.Px75Role;
 import nl.ctasoftware.crypto.ticker.server.model.Px75User;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.Px75PanelConfig;
 import nl.ctasoftware.crypto.ticker.server.repository.PanelConfigRepository;
 import nl.ctasoftware.crypto.ticker.server.repository.PanelRepository;
-import nl.ctasoftware.crypto.ticker.server.service.job.JobSchedulerService;
+import nl.ctasoftware.crypto.ticker.server.service.job.PanelRotationControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -17,12 +18,13 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class Px75PanelService {
     final PanelRepository panelRepository;
     final PanelConfigRepository panelConfigRepository;
-    final JobSchedulerService jobSchedulerService;
+    final PanelRotationControl panelRotationControl;
 
     public List<Px75Panel> getPx75Panels() {
         return panelRepository.findAll();
@@ -64,7 +66,7 @@ public class Px75PanelService {
 
         // Stop de screen-job vóór de rijen weggaan: zonder dit blijft de job de (inmiddels
         // verwijderde) config oneindig publiceren op het serial-topic van het paneel.
-        jobSchedulerService.stop(panel.getSerial(), true);
+        panelRotationControl.stopBeforeDelete(panel.getSerial());
 
         panelRepository.deleteById(panelId);
         panelConfigRepository.deleteById(panelId);

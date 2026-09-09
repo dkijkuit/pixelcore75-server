@@ -38,15 +38,15 @@ class UploadIdHasherTests {
     @Test
     void stageOnlyFlagDoesNotChangeHash() {
         assertEquals(UploadIdHasher.contentHash(2, 100, 0, TWO_FRAMES),
-                UploadIdHasher.contentHash(2, 100, PanelScreenJob.ANIM_FLAG_STAGE_ONLY, TWO_FRAMES));
+                UploadIdHasher.contentHash(2, 100, AnimationTransport.ANIM_FLAG_STAGE_ONLY, TWO_FRAMES));
     }
 
     @Test
     void codecBitsDoNotChangeHash() {
         final long raw = UploadIdHasher.contentHash(2, 100, 0, TWO_FRAMES);
-        assertEquals(raw, UploadIdHasher.contentHash(2, 100, PanelScreenJob.ANIM_CODEC_PAL_RLE, TWO_FRAMES));
+        assertEquals(raw, UploadIdHasher.contentHash(2, 100, AnimationTransport.ANIM_CODEC_PAL_RLE, TWO_FRAMES));
         assertEquals(raw, UploadIdHasher.contentHash(2, 100,
-                PanelScreenJob.ANIM_FLAG_STAGE_ONLY | PanelScreenJob.ANIM_CODEC_PAL_RLE, TWO_FRAMES));
+                AnimationTransport.ANIM_FLAG_STAGE_ONLY | AnimationTransport.ANIM_CODEC_PAL_RLE, TWO_FRAMES));
     }
 
     @Test

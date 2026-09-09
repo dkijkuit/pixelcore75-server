@@ -13,6 +13,8 @@ public interface PanelRepository extends JpaRepository<Px75Panel, Long> {
 
     Optional<Px75Panel> findByUserIdAndPanelId(Long userId, Long panelId);
 
+    Optional<Px75Panel> findBySerialIgnoreCase(String serial);
+
     @Query("select serial from Px75Panel where panelId = :panelId and userId = :userId")
     Optional<String> findSerialByIdAndUserId(@Param("panelId") long panelId, @Param("userId") long userId);
 

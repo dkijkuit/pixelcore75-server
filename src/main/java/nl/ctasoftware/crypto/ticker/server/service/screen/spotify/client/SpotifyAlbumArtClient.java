@@ -60,7 +60,17 @@ public class SpotifyAlbumArtClient {
     private final Map<String, Optional<AlbumArt>> cache;
 
     public SpotifyAlbumArtClient() {
-        this.restClient = RestClient.create();
+        // Test convenience ctor: same timed factory as the injected bean path — the CDN
+        // fetch must never hang a render tick either (plan §7 perf 1).
+        this(nl.ctasoftware.crypto.ticker.server.config.ClientConfig.timedJdkRequestFactory(
+                java.time.Duration.ofSeconds(3), java.time.Duration.ofSeconds(5)));
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public SpotifyAlbumArtClient(final org.springframework.http.client.JdkClientHttpRequestFactory timedJdkRequestFactory) {
+        this.restClient = RestClient.builder()
+                .requestFactory(timedJdkRequestFactory)
+                .build();
         this.cache = Collections.synchronizedMap(
                 new LinkedHashMap<>(32, 0.75f, true) {
                     @Override

@@ -1,6 +1,7 @@
 package nl.ctasoftware.crypto.ticker.server.service.job;
 
 import nl.ctasoftware.crypto.ticker.server.model.Px75Panel;
+import nl.ctasoftware.crypto.ticker.server.model.Px75PanelType;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.AircraftScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.AnimationScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ClockScreenConfig;
@@ -15,14 +16,15 @@ import nl.ctasoftware.crypto.ticker.server.service.command.CommandBatch;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageBroadcasterService;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageService;
 import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
+import nl.ctasoftware.crypto.ticker.server.service.mqtt.MqttTransport;
 import nl.ctasoftware.crypto.ticker.server.service.panel.AnimationLoadAckService;
+import nl.ctasoftware.crypto.ticker.server.service.panel.Px75PanelConfigService;
+import nl.ctasoftware.crypto.ticker.server.repository.PanelRepository;
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.ScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.clock.ClockScreenService;
-import org.eclipse.paho.client.mqttv3.IMqttClient;
-import org.eclipse.paho.client.mqttv3.IMqttMessageListener;
-import org.eclipse.paho.client.mqttv3.MqttMessage;
+import org.jobrunr.scheduling.JobScheduler;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,13 +34,11 @@ import org.mockito.ArgumentCaptor;
 import java.awt.image.BufferedImage;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -46,8 +46,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -57,23 +57,27 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * {@code PanelScreenJob}'s ACMD command branch (plan §6), docker-free against a mocked
- * MQTT client: flag ON + {@link CommandScreenService} → exactly one QoS-0 not-retained
+ * The rotation pipeline's ACMD command branch (plan §6), docker-free against a mocked
+ * MQTT transport: flag ON + {@link CommandScreenService} → exactly one QoS-0 not-retained
  * {@code <serial>/cmd} publish of a parseable batch, the retained base image cleared,
  * no ANIM traffic, staging skipped for command screens. Flag OFF (or a non-command
  * screen) → the frame/static path byte-for-byte and zero {@code /cmd} publishes.
  */
-class PanelScreenJobCommandTests {
+class PanelRotationJobCommandTests {
 
     private static final String SERIAL = "CMDTESTP1";
 
     private record Pub(String topic, byte[] payload, int qos, boolean retained) {}
 
-    private IMqttClient mqttClient;
+    private MqttTransport mqttTransport;
+    private JobScheduler jobScheduler;
+    private RotationStateService rotationStateService;
     private AnimationLoadAckService ackService;
     private ImageService imageService;
     private ImageBroadcasterService broadcaster;
-    private IMqttMessageListener loadedListener;
+    private PanelRepository panelRepository;
+    private Px75PanelConfigService panelConfigService;
+    private MqttTransport.MqttMessageListener loadedListener;
 
     /** Written from the job thread AND the page-flip virtual thread — must be thread-safe. */
     private final List<Pub> pubs = new CopyOnWriteArrayList<>();
@@ -88,48 +92,36 @@ class PanelScreenJobCommandTests {
 
     @BeforeAll
     static void createScratchDir() throws Exception {
-        Files.createDirectories(Path.of("generated_images"));
+        Files.createDirectories(Path.of(PanelRotationControl.GENERATED_IMAGES_DIR));
     }
 
     @AfterAll
     static void deleteScratchFile() throws Exception {
-        Files.deleteIfExists(Path.of("generated_images", SERIAL + ".png"));
+        Files.deleteIfExists(Path.of(PanelRotationControl.GENERATED_IMAGES_DIR, SERIAL + ".png"));
     }
 
     @BeforeEach
-    void setUp() throws Exception {
-        mqttClient = mock(IMqttClient.class);
-        ackService = new AnimationLoadAckService(mqttClient);
+    void setUp() {
+        mqttTransport = mock(MqttTransport.class);
+        rotationStateService = new RotationStateService();
+        jobScheduler = mock(JobScheduler.class);
+        ackService = new AnimationLoadAckService(mqttTransport);
 
-        final ArgumentCaptor<IMqttMessageListener> listenerCaptor =
-                ArgumentCaptor.forClass(IMqttMessageListener.class);
-        verify(mqttClient).subscribe(anyString(), listenerCaptor.capture());
+        final ArgumentCaptor<MqttTransport.MqttMessageListener> listenerCaptor =
+                ArgumentCaptor.forClass(MqttTransport.MqttMessageListener.class);
+        verify(mqttTransport).subscribe(anyString(), listenerCaptor.capture());
         loadedListener = listenerCaptor.getValue();
 
         doAnswer(invocation -> {
-            final String topic = invocation.getArgument(0);
-            final byte[] payload = invocation.getArgument(1);
-            pubs.add(new Pub(topic, payload, invocation.getArgument(2), invocation.getArgument(3)));
-            if (topic.endsWith("/anim/start")) {
-                pendingSlot = payload[13] & 0xFF;
-                pendingUploadId = u32le(payload, 8);
-                pendingFrameCount = (payload[4] & 0xFF) | (payload[5] & 0xFF) << 8;
-                receivedFrames = 0;
-            } else if (topic.endsWith("/anim/frame")) {
-                receivedFrames++;
-                if (ackUploads && receivedFrames == pendingFrameCount) {
-                    fireLoaded(pendingSlot, pendingUploadId);
-                }
-            }
+            handlePublish(invocation.getArgument(0), invocation.getArgument(1),
+                    invocation.getArgument(2), invocation.getArgument(3));
             return null;
-        }).when(mqttClient).publish(anyString(), any(byte[].class), anyInt(), anyBoolean());
-
+        }).when(mqttTransport).publish(anyString(), any(byte[].class), anyInt(), anyBoolean());
         doAnswer(invocation -> {
-            final MqttMessage message = invocation.getArgument(1);
-            pubs.add(new Pub(invocation.getArgument(0), message.getPayload(),
-                    message.getQos(), message.isRetained()));
-            return null;
-        }).when(mqttClient).publish(anyString(), any(MqttMessage.class));
+            handlePublish(invocation.getArgument(0), invocation.getArgument(1),
+                    invocation.getArgument(2), invocation.getArgument(3));
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }).when(mqttTransport).publishAsync(anyString(), any(byte[].class), anyInt(), anyBoolean());
 
         imageService = mock(ImageService.class);
         when(imageService.scale(any(), anyInt(), anyInt())).thenAnswer(inv -> inv.getArgument(0));
@@ -137,6 +129,31 @@ class PanelScreenJobCommandTests {
                 .thenAnswer(inv -> frameBytes.computeIfAbsent(inv.getArgument(0),
                         img -> new byte[AnimationFrameCodec.FRAME_BYTES]));
         broadcaster = mock(ImageBroadcasterService.class);
+
+        panelRepository = mock(PanelRepository.class);
+        when(panelRepository.findBySerialIgnoreCase(SERIAL)).thenReturn(java.util.Optional.of(
+                new Px75Panel(1L, 1L, SERIAL, "00:00:00:00:00:00", "test", Px75PanelType.P_64_X_32)));
+        panelConfigService = mock(Px75PanelConfigService.class);
+        when(panelConfigService.getPanelConfig(1L)).thenAnswer(
+                invocation -> new Px75PanelConfig(1L, jobConfigs));
+    }
+
+    private List<ScreenConfig> jobConfigs;
+
+    /** Firmware stand-in shared by the sync and async publish stubs. */
+    private void handlePublish(final String topic, final byte[] payload, final int qos, final boolean retained) {
+        pubs.add(new Pub(topic, payload, qos, retained));
+        if (topic.endsWith("/anim/start")) {
+            pendingSlot = payload[13] & 0xFF;
+            pendingUploadId = u32le(payload, 8);
+            pendingFrameCount = (payload[4] & 0xFF) | (payload[5] & 0xFF) << 8;
+            receivedFrames = 0;
+        } else if (topic.endsWith("/anim/frame")) {
+            receivedFrames++;
+            if (ackUploads && receivedFrames == pendingFrameCount) {
+                fireLoaded(pendingSlot, pendingUploadId);
+            }
+        }
     }
 
     /* ------------------------------------------------------------------ */
@@ -152,8 +169,8 @@ class PanelScreenJobCommandTests {
         }
 
         @Override
-        public Optional<BufferedImage> renderScreen(final ClockScreenConfig screenConfig) {
-            return Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+        public java.util.Optional<BufferedImage> renderScreen(final ClockScreenConfig screenConfig) {
+            return java.util.Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
         }
 
         @Override
@@ -171,8 +188,8 @@ class PanelScreenJobCommandTests {
         }
 
         @Override
-        public Optional<BufferedImage> renderScreen(final AircraftScreenConfig screenConfig) {
-            return Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+        public java.util.Optional<BufferedImage> renderScreen(final AircraftScreenConfig screenConfig) {
+            return java.util.Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
         }
 
         @Override
@@ -195,8 +212,8 @@ class PanelScreenJobCommandTests {
         }
 
         @Override
-        public Optional<BufferedImage> renderScreen(final ScreenConfig screenConfig) {
-            return Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+        public java.util.Optional<BufferedImage> renderScreen(final ScreenConfig screenConfig) {
+            return java.util.Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
         }
 
         @Override
@@ -229,26 +246,22 @@ class PanelScreenJobCommandTests {
         }
 
         @Override
-        public boolean commandCapable(
-                final nl.ctasoftware.crypto.ticker.server.model.panel.config.CustomScreenConfig screenConfig) {
+        public boolean commandCapable(final CustomScreenConfig screenConfig) {
             return capable;
         }
 
         @Override
-        public byte[] renderCommandBatch(
-                final nl.ctasoftware.crypto.ticker.server.model.panel.config.CustomScreenConfig screenConfig) {
+        public byte[] renderCommandBatch(final CustomScreenConfig screenConfig) {
             return CommandBatch.builder().cls(0x0000).blink(0, 0, 8, 8, 500).build();
         }
 
         @Override
-        public Optional<BufferedImage> renderScreen(
-                final nl.ctasoftware.crypto.ticker.server.model.panel.config.CustomScreenConfig screenConfig) {
-            return Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+        public java.util.Optional<BufferedImage> renderScreen(final CustomScreenConfig screenConfig) {
+            return java.util.Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
         }
 
         @Override
-        public List<BufferedImage> renderFrames(
-                final nl.ctasoftware.crypto.ticker.server.model.panel.config.CustomScreenConfig screenConfig) {
+        public List<BufferedImage> renderFrames(final CustomScreenConfig screenConfig) {
             return List.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB),
                     new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
         }
@@ -268,8 +281,8 @@ class PanelScreenJobCommandTests {
         }
 
         @Override
-        public Optional<BufferedImage> renderScreen(final ScreenConfig screenConfig) {
-            return Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+        public java.util.Optional<BufferedImage> renderScreen(final ScreenConfig screenConfig) {
+            return java.util.Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
         }
 
         @Override
@@ -288,8 +301,9 @@ class PanelScreenJobCommandTests {
     /* ------------------------------------------------------------------ */
 
     @Test
-    void flagOnPublishesCommandBatchToCmdTopicAndClearsRetainedBase() throws Exception {
-        newJob(true, new StubClockService(), clockConfig()).run();
+    void flagOnPublishesCommandBatchToCmdTopicAndClearsRetainedBase() {
+        jobConfigs = List.of(clockConfig());
+        runSlot(newJob(true, new StubClockService()));
 
         assertEquals(2, pubs.size(), "exactly the retained clear + the command batch");
         assertEquals(SERIAL, pubs.get(0).topic());
@@ -310,8 +324,9 @@ class PanelScreenJobCommandTests {
     }
 
     @Test
-    void flagOffUsesStaticFramePathAndNeverTouchesCmd() throws Exception {
-        newJob(false, new StubClockService(), clockConfig()).run();
+    void flagOffUsesStaticFramePathAndNeverTouchesCmd() {
+        jobConfigs = List.of(clockConfig());
+        runSlot(newJob(false, new StubClockService()));
 
         assertEquals(1, pubs.size(), "one static retained frame publish, nothing else");
         assertEquals(SERIAL, pubs.getFirst().topic());
@@ -322,7 +337,7 @@ class PanelScreenJobCommandTests {
     }
 
     @Test
-    void flagOnWithFrameScreenKeepsFramePathByteForByte() throws Exception {
+    void flagOnWithFrameScreenKeepsFramePathByteForByte() {
         @SuppressWarnings("unchecked")
         final FrameScreenService<AnimationScreenConfig> animationService = mock(FrameScreenService.class);
         when(animationService.getScreenType()).thenReturn(ScreenType.ANIMATION);
@@ -332,39 +347,40 @@ class PanelScreenJobCommandTests {
                                 new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB)),
                         50));
         ackUploads = true;
+        jobConfigs = List.of(new AnimationScreenConfig(ScreenType.ANIMATION, 1, 50, List.of("f1", "f2")));
 
-        newJob(true, animationService,
-                new AnimationScreenConfig(ScreenType.ANIMATION, 1, 50, List.of("f1", "f2"))).run();
+        runSlot(newJob(true, animationService));
 
-        assertEquals(1, pubs(p -> p.topic().equals(SERIAL + PanelScreenJob.ANIM_START_TOPIC)).size(),
+        assertEquals(1, pubs(p -> p.topic().equals(SERIAL + AnimationTransport.ANIM_START_TOPIC)).size(),
                 "flag ON on a non-command screen must upload the animation as before");
-        assertEquals(2, pubs(p -> p.topic().equals(SERIAL + PanelScreenJob.ANIM_FRAME_TOPIC)).size());
+        assertEquals(2, pubs(p -> p.topic().equals(SERIAL + AnimationTransport.ANIM_FRAME_TOPIC)).size());
         assertTrue(pubs.stream().noneMatch(p -> p.topic().endsWith("/cmd")),
                 "a screen without CommandScreenService never reaches /cmd");
     }
 
     @Test
-    void stagingSkipsFrameUploadWhenNextScreenRendersViaCommands() throws Exception {
-        final PanelScreenJob job = newJob(true, new StubClockService(), new StubRadarService(),
-                clockConfig(), radarConfig());
+    void stagingSkipsFrameUploadWhenNextScreenRendersViaCommands() {
+        jobConfigs = List.of(clockConfig(), radarConfig());
+        final PanelRotationJob job = newJob(true, new StubClockService(), new StubRadarService());
 
-        job.run(); // clock boundary: radar would normally stage its frame stream here
+        final String jobId = runSlot(job); // clock boundary: radar would normally stage its frame stream here
 
         assertEquals(2, pubs.size(), "retained clear + clock batch; no staging upload for a command-rendered next screen");
         assertEquals(SERIAL, pubs.get(0).topic());
         assertEquals(SERIAL + "/cmd", pubs.get(1).topic());
 
-        job.run(); // radar boundary: command path, not the staged inline upload
+        job.execute(SERIAL, jobId); // radar boundary: command path, not the staged inline upload
 
         assertEquals(4, pubs.size(), "radar boundary publishes clear + batch, nothing else");
         assertEquals(SERIAL + "/cmd", pubs.get(3).topic());
-        assertEquals(0, pubs(p -> p.topic().endsWith(PanelScreenJob.ANIM_START_TOPIC)).size(),
+        assertEquals(0, pubs(p -> p.topic().endsWith(AnimationTransport.ANIM_START_TOPIC)).size(),
                 "no ANIM upload anywhere in the rotation");
     }
 
     @Test
-    void capableCustomDesignRendersViaCommandsFlagOn() throws Exception {
-        newJob(true, new StubCustomService(true), customConfig(SINGLE_FRAME_DESIGN)).run();
+    void capableCustomDesignRendersViaCommandsFlagOn() {
+        jobConfigs = List.of(customConfig(SINGLE_FRAME_DESIGN));
+        runSlot(newJob(true, new StubCustomService(true)));
 
         assertEquals(2, pubs.size(), "retained clear + the command batch");
         assertEquals(SERIAL + "/cmd", pubs.get(1).topic());
@@ -373,10 +389,11 @@ class PanelScreenJobCommandTests {
     }
 
     @Test
-    void frameDesignCustomScreenKeepsItsPathsDespiteTheCommandInterface() throws Exception {
+    void frameDesignCustomScreenKeepsItsPathsDespiteTheCommandInterface() {
         // Flag ON and the CUSTOM service implements CommandScreenService — but this design
         // is not command-capable: a single-frame design takes the static retained path...
-        newJob(true, new StubCustomService(false), customConfig(SINGLE_FRAME_DESIGN)).run();
+        jobConfigs = List.of(customConfig(SINGLE_FRAME_DESIGN));
+        runSlot(newJob(true, new StubCustomService(false)));
 
         assertEquals(1, pubs.size(), "one static retained frame publish, nothing else");
         assertEquals(SERIAL, pubs.getFirst().topic());
@@ -386,15 +403,15 @@ class PanelScreenJobCommandTests {
     }
 
     @Test
-    void stagingUploadsIncapableCustomFrameDesigns() throws Exception {
+    void stagingUploadsIncapableCustomFrameDesigns() {
         ackUploads = true;
         // ...and a multi-frame design still stages its ANIM upload for the next boundary.
-        final PanelScreenJob job = newJob(true, new StubClockService(), new StubCustomService(false),
-                clockConfig(), customConfig(TWO_FRAME_DESIGN));
+        jobConfigs = List.of(clockConfig(), customConfig(TWO_FRAME_DESIGN));
+        final PanelRotationJob job = newJob(true, new StubClockService(), new StubCustomService(false));
 
-        job.run(); // clock boundary: stage the custom animation
+        runSlot(job); // clock boundary: stage the custom animation
 
-        assertEquals(1, pubs(p -> p.topic().equals(SERIAL + PanelScreenJob.ANIM_START_TOPIC)).size(),
+        assertEquals(1, pubs(p -> p.topic().equals(SERIAL + AnimationTransport.ANIM_START_TOPIC)).size(),
                 "the frame-design CUSTOM must stage its animation despite the command interface");
         // The clock boundary legitimately publishes its own /cmd batch (pub #2); nothing
         // after it may touch /cmd — the incapable custom stays on the ANIM pipeline.
@@ -405,7 +422,8 @@ class PanelScreenJobCommandTests {
 
     @Test
     void flagOnCyclesCommandPagesAtTheDwellUntilTheSlotEnds() throws Exception {
-        newJob(true, new StubPagedService(), pagedConfig()).run();
+        jobConfigs = List.of(pagedConfig());
+        runSlot(newJob(true, new StubPagedService()));
 
         // Initial page publishes synchronously; the flip to page 2 lands within a
         // preview tick after the 300 ms dwell.
@@ -428,7 +446,8 @@ class PanelScreenJobCommandTests {
 
     @Test
     void flagOnRefreshesTheCommandBatchUntilTheSlotEnds() throws Exception {
-        newJob(true, new StubRefreshingService(), radarConfig()).run();
+        jobConfigs = List.of(radarConfig());
+        runSlot(newJob(true, new StubRefreshingService()));
 
         // 1 s slot on a 300 ms grid: the first batch plus refreshes at 300/600/900 ms.
         final long deadline = System.currentTimeMillis() + 3_000;
@@ -456,6 +475,13 @@ class PanelScreenJobCommandTests {
 
     /* ------------------------------------------------------------------ */
 
+    /** Runs one slot, returning the successor's admission id (the mocked scheduler never runs it). */
+    private String runSlot(final PanelRotationJob job) {
+        final String jobId = rotationStateService.kick(SERIAL);
+        job.execute(SERIAL, jobId);
+        return rotationStateService.stateFor(SERIAL).allowedJobId.get();
+    }
+
     private void awaitCmdPubs(final int count, final long timeoutMs) throws InterruptedException {
         final long deadline = System.currentTimeMillis() + timeoutMs;
         while (pubs(p -> p.topic().equals(SERIAL + "/cmd")).size() < count
@@ -470,25 +496,27 @@ class PanelScreenJobCommandTests {
         return pubs.stream().filter(filter).toList();
     }
 
-    private PanelScreenJob newJob(final boolean enabled, final ScreenService<? extends ScreenConfig> first,
-                                  final ScreenService<? extends ScreenConfig> second,
-                                  final ScreenConfig firstConfig, final ScreenConfig secondConfig) {
-        final Px75Panel px75Panel = mock(Px75Panel.class);
-        when(px75Panel.getSerial()).thenReturn(SERIAL);
-        final List<ScreenService<? extends ScreenConfig>> services = List.of(first, second);
-        final ConcurrentMap<String, AtomicInteger> previewGenerations = new ConcurrentHashMap<>();
-        return new PanelScreenJob(px75Panel, new Px75PanelConfig(1L, List.of(firstConfig, secondConfig)),
-                services, imageService, mqttClient, broadcaster, ackService, previewGenerations, enabled);
+    private PanelRotationJob newJob(final boolean enabled, final ScreenService<? extends ScreenConfig> first,
+                                    final ScreenService<? extends ScreenConfig> second) {
+        return buildJob(enabled, List.of(first, second));
     }
 
-    private PanelScreenJob newJob(final boolean enabled,
-                                  final ScreenService<? extends ScreenConfig> service,
-                                  final ScreenConfig config) {
-        final Px75Panel px75Panel = mock(Px75Panel.class);
-        when(px75Panel.getSerial()).thenReturn(SERIAL);
-        final ConcurrentMap<String, AtomicInteger> previewGenerations = new ConcurrentHashMap<>();
-        return new PanelScreenJob(px75Panel, new Px75PanelConfig(1L, List.of(config)),
-                List.of(service), imageService, mqttClient, broadcaster, ackService, previewGenerations, enabled);
+    private PanelRotationJob newJob(final boolean enabled,
+                                    final ScreenService<? extends ScreenConfig> service) {
+        return buildJob(enabled, List.of(service));
+    }
+
+    private PanelRotationJob buildJob(final boolean enabled,
+                                      final List<ScreenService<? extends ScreenConfig>> services) {
+        final ScreenServices screenServices = new ScreenServices(new ArrayList<>(services));
+        final RotationPlanner planner = new RotationPlanner(config -> config);
+        final AnimationTransport transport = new AnimationTransport(
+                imageService, ackService, screenServices, rotationStateService, mqttTransport, enabled);
+        final PreviewStreamer previewStreamer = new PreviewStreamer(imageService, broadcaster, rotationStateService);
+        final CommandPublisher commandPublisher = new CommandPublisher(mqttTransport, rotationStateService, previewStreamer);
+        return new PanelRotationJob(panelRepository, panelConfigService, screenServices, planner,
+                transport, commandPublisher, previewStreamer, rotationStateService,
+                jobScheduler, mqttTransport, imageService, enabled);
     }
 
     private static ClockScreenConfig clockConfig() {
@@ -517,14 +545,10 @@ class PanelScreenJobCommandTests {
     }
 
     private void fireLoaded(final int slot, final long uploadId) {
-        try {
-            loadedListener.messageArrived(SERIAL + "/anim/loaded", new MqttMessage(new byte[]{
-                    'A', 'N', 'I', 'L',
-                    (byte) slot,
-                    (byte) uploadId, (byte) (uploadId >> 8), (byte) (uploadId >> 16), (byte) (uploadId >> 24)}));
-        } catch (final Exception e) {
-            throw new IllegalStateException(e);
-        }
+        loadedListener.messageArrived(SERIAL + "/anim/loaded", new byte[]{
+                'A', 'N', 'I', 'L',
+                (byte) slot,
+                (byte) uploadId, (byte) (uploadId >> 8), (byte) (uploadId >> 16), (byte) (uploadId >> 24)});
     }
 
     private static long u32le(final byte[] payload, final int offset) {

@@ -37,3 +37,6 @@ out/
 
 ### VS Code ###
 .vscode/
+
+### HiveMQ client session dirs (created in the working dir by the MQTT client) ###
+pixelcore75-server-*

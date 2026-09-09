@@ -3,14 +3,12 @@ package nl.ctasoftware.crypto.ticker.server.security;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jws;
 import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
 import nl.ctasoftware.crypto.ticker.server.model.Px75User;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.crypto.SecretKey;
-import java.security.Key;
 import java.util.Date;
 import java.util.UUID;
 
@@ -33,41 +31,37 @@ public class JwtService {
     }
 
     public String generateAccessToken(final Px75User px75User) {
-        return Jwts.builder()
-                .setIssuer(ISSUER)
-                .setSubject(px75User.getUsername())
-                .claim("roles", px75User.getRoles())
-                .setId(UUID.randomUUID().toString())
-                .setIssuedAt(new Date())
-                .setExpiration(new Date(System.currentTimeMillis() + accessExpiration))
-                .signWith(accessKey, SignatureAlgorithm.HS256)
-                .compact();
+        return buildToken(px75User, accessKey, accessExpiration);
     }
 
 
     public String generateRefreshToken(final Px75User px75User) {
+        return buildToken(px75User, refreshKey, refreshExpiration);
+    }
+
+    private String buildToken(final Px75User px75User, final SecretKey key, final long expiration) {
         return Jwts.builder()
-                .setIssuer(ISSUER)
-                .setSubject(px75User.getUsername())
+                .issuer(ISSUER)
+                .subject(px75User.getUsername())
                 .claim("roles", px75User.getRoles())
-                .setId(UUID.randomUUID().toString())
-                .setIssuedAt(new Date())
-                .setExpiration(new Date(System.currentTimeMillis() + refreshExpiration))
-                .signWith(refreshKey, SignatureAlgorithm.HS256)
+                .id(UUID.randomUUID().toString())
+                .issuedAt(new Date())
+                .expiration(new Date(System.currentTimeMillis() + expiration))
+                .signWith(key, Jwts.SIG.HS256)
                 .compact();
     }
 
     private Jws<Claims> parse(String token, boolean isRefresh) {
-        return Jwts.parserBuilder()
+        return Jwts.parser()
                 .requireIssuer(ISSUER)
-                .setAllowedClockSkewSeconds(60) // 1 min skew
-                .setSigningKey(isRefresh ? refreshKey : accessKey)
+                .clockSkewSeconds(60) // 1 min skew
+                .verifyWith(isRefresh ? refreshKey : accessKey)
                 .build()
-                .parseClaimsJws(token);
+                .parseSignedClaims(token);
     }
 
     public String extractUsername(String token, boolean isRefresh) {
-        return parse(token, isRefresh).getBody().getSubject();
+        return parse(token, isRefresh).getPayload().getSubject();
     }
 
     public boolean isValid(String token) {
