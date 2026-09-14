@@ -5,10 +5,13 @@ import nl.ctasoftware.crypto.ticker.server.model.Px75User;
 import nl.ctasoftware.crypto.ticker.server.model.dto.CustomScreenDto;
 import nl.ctasoftware.crypto.ticker.server.model.dto.CustomScreenPreviewRequest;
 import nl.ctasoftware.crypto.ticker.server.model.dto.CustomScreenPreviewResponse;
+import nl.ctasoftware.crypto.ticker.server.model.dto.FontPageResponse;
 import nl.ctasoftware.crypto.ticker.server.model.dto.SaveCustomScreenRequest;
+import nl.ctasoftware.crypto.ticker.server.service.command.FontPageExtractor;
 import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.custom.CustomScreenLibraryService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.custom.CustomScreenService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.custom.PxdFont;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
@@ -80,6 +83,27 @@ public class CustomScreenController {
                 .map(CustomScreenController::toPngDataUrl)
                 .toList();
         return new CustomScreenPreviewResponse(frames, (int) stream.frameDelayMs());
+    }
+
+    /**
+     * ACMD FONT-page glyphs for a pxd font (spec §3.3): the exact bitmaps the panel
+     * draws for TEXT/SCROLL, so the designer's edit canvas composites text pixel-exact
+     * instead of approximating with browser fonts. Pure function of the font's TTF.
+     */
+    @GetMapping("fontpage/{font}")
+    FontPageResponse fontPage(@PathVariable final String font) {
+        final PxdFont pxdFont = PxdFont.fromId(font);
+        if (pxdFont == null) {
+            throw new IllegalArgumentException("unknown font " + font);
+        }
+        final FontPageExtractor.FontPage page = customScreenService.fontPage(pxdFont);
+        final List<FontPageResponse.GlyphResponse> glyphs = page.glyphs().stream()
+                .map(g -> new FontPageResponse.GlyphResponse(g.code(), g.w(), g.h(),
+                        g.xAdvance(), g.xOff(), g.yOff(),
+                        Base64.getEncoder().encodeToString(g.bitmap())))
+                .toList();
+        return new FontPageResponse(pxdFont.name(), customScreenService.ascent(pxdFont),
+                page.lineTop(), glyphs);
     }
 
     private static String toPngDataUrl(final BufferedImage image) {

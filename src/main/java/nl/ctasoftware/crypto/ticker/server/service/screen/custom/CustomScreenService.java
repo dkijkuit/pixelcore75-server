@@ -228,11 +228,11 @@ public class CustomScreenService implements FrameScreenService<CustomScreenConfi
         return out.toString();
     }
 
-    private FontPageExtractor.FontPage fontPage(final PxdFont font) {
+    public FontPageExtractor.FontPage fontPage(final PxdFont font) {
         return fontPages.computeIfAbsent(font, f -> FontPageExtractor.extract(fonts.get(f)));
     }
 
-    private int ascent(final PxdFont font) {
+    public int ascent(final PxdFont font) {
         return ascents.computeIfAbsent(font, f -> metrics(f).getAscent());
     }
 

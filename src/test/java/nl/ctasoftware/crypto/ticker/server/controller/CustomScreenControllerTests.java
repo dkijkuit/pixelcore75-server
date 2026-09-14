@@ -23,6 +23,7 @@ import java.awt.FontFormatException;
 import java.io.File;
 import java.io.IOException;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.List;
 import java.util.Set;
 
@@ -138,6 +139,58 @@ class CustomScreenControllerTests {
         assertTrue(body.contains("\"frameDelayMs\":100"), body);
         // sweep loop 360/45 s = 8000 ms → 80 sampled frames at the 100 ms tick
         assertEquals(80, countOccurrences(body, "data:image/png;base64,"), body);
+    }
+
+    /* ------------------------- fontpage endpoint ------------------------- */
+
+    @Test
+    void fontPageReturnsAscentLineTopAndAllAsciiGlyphs() throws Exception {
+        final MvcResult result = mockMvc.perform(get("/v1/screen/custom/fontpage/CG_PIXEL"))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        final String body = result.getResponse().getContentAsString();
+        assertTrue(body.contains("\"font\":\"CG_PIXEL\""), body);
+        // Latin-fold mirror convention: pxd y + ascent + lineTop = ACMD glyph-top y.
+        assertTrue(body.contains("\"ascent\":"), body);
+        assertTrue(body.contains("\"lineTop\":"), body);
+        // The extractor always emits ASCII 32..126 (95 glyphs, blank ones as 1x1 zeros).
+        assertEquals(95, countOccurrences(body, "\"code\":"), body);
+    }
+
+    @Test
+    void fontPageServesEveryRegistryFont() throws Exception {
+        for (final String font : new String[] {"CG_PIXEL", "MINI_LINE", "HABBO", "LED_BOARD",
+                "TINY", "FROST", "GRINCHED"}) {
+            mockMvc.perform(get("/v1/screen/custom/fontpage/" + font))
+                    .andExpect(status().isOk());
+        }
+    }
+
+    @Test
+    void fontPageGlyphBitmapsDecodeToTheWireBytes() throws Exception {
+        final MvcResult result = mockMvc.perform(get("/v1/screen/custom/fontpage/CG_PIXEL"))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        final String body = result.getResponse().getContentAsString();
+        // Glyph 'A' (code 65) must carry a non-empty MSB-first bitmap (base64 of ceil(w/8) * h bytes).
+        final int code = body.indexOf("\"code\":65");
+        assertTrue(code >= 0, body);
+        final int bitmap = body.indexOf("\"bitmap\":\"", code);
+        assertTrue(bitmap >= 0, body);
+        final int start = bitmap + "\"bitmap\":\"".length();
+        final String base64 = body.substring(start, body.indexOf('"', start));
+        final byte[] bytes = Base64.getDecoder().decode(base64);
+        assertTrue(bytes.length >= 1, body);
+    }
+
+    @Test
+    void fontPageRejectsUnknownFontWith400AndMessage() throws Exception {
+        mockMvc.perform(get("/v1/screen/custom/fontpage/NOPE"))
+                .andExpect(status().isBadRequest())
+                .andExpect(result -> assertTrue(result.getResponse().getContentAsString()
+                        .contains("\"message\":\"unknown font NOPE\"")));
     }
 
     /* ------------------------- library endpoints ------------------------- */

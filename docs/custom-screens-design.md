@@ -14,7 +14,7 @@ panels through the existing static-frame / ANIM pipelines.
 | Decision | Choice |
 |---|---|
 | Phase 1 scope | Editor first: pixel editor → `.pxd` design doc → compiled to static frame or ANIM stream |
-| Rendering truth | **Server only** (Java2D). The designer previews via a new HTTP endpoint, not a client-side renderer. The edit canvas itself is local pixel manipulation; overlay text on canvas is an approximation |
+| Rendering truth | **Server only** (Java2D). The designer previews via a new HTTP endpoint, not a client-side renderer. The edit canvas itself is local pixel manipulation; overlay text composites the server's ACMD FONT-page glyph bitmaps (pixel-exact), with a bundled-TTF fallback |
 | Live content (Phase 2) | Hybrid: server re-render + re-publish timer now; ACMD slot-in later via a per-design capability field (reserved) |
 | Sharing | Import/export `.pxd` files only — no gallery, no auth surface |
 | Firmware | Zero changes in Phase 1 — multi-frame designs ride the existing ANIM pipeline (slots, `uploadId` content-hash caching, staging, LittleFS persistence all come free) |
@@ -252,10 +252,30 @@ Content-Type: application/json
    Frames are native 64×32 PNGs in play order (single frame allowed); the client upscales with
    `image-rendering: pixelated`. Reuses the SSE base64-PNG encoding helper if one exists.
 
-10. Tests (infra is up, `./gradlew test` runs): `PxdDesign` parse/validate cases (valid minimal,
+10. **Font-page endpoint** (same controller) — the ACMD FONT-page glyphs of one pxd font, so the
+    designer's edit canvas composites text pixel-exact (the panel's own TEXT bitmaps) instead of
+    approximating with browser fonts:
+
+```
+GET /v1/screen/custom/fontpage/{font}        (font: pxd id, e.g. CG_PIXEL)
+
+200 → { "font": "CG_PIXEL", "ascent": 4, "lineTop": 0,
+        "glyphs": [ { "code": 65, "w": 4, "h": 5, "xAdvance": 5, "xOff": 0, "yOff": 0,
+                      "bitmap": "<base64, h rows × ceil(w/8) bytes, MSB-first>" }, ... ] }
+400 → { "message": "unknown font NOPE" }
+```
+
+    Pure function of the font's TTF (always the fixed ASCII 32..126 page, 95 glyphs, blank ones
+    as 1×1 zero bitmaps); cached per font by the service. Client layout rules = ACMD TEXT:
+    glyph at (penX + xOff, y + ascent + lineTop + yOff), penX += xAdvance, unknown char → advance 4.
+    The golden parity tests already pin FONT-page vs frame-path text at 0 px, so one bitmap set
+    is exact for both render paths (static/ANIM and command).
+
+11. Tests (infra is up, `./gradlew test` runs): `PxdDesign` parse/validate cases (valid minimal,
     unknown fields ignored, wrong schemaVersion, bad color, frames caps, font ids),
     `CustomScreenService` compile (bitmap-only, text top-of-line-box, multi-frame count/dims),
-    controller test for the preview endpoint (200 + 400 paths).
+    controller test for the preview endpoint (200 + 400 paths) and the fontpage endpoint
+    (200 + 400 paths).
 
 ## 6. Frontend implementation plan (`../pixelcore75-frontend`)
 
@@ -277,9 +297,11 @@ Follow the `add-screen-type` skill (registry trio + form). Files:
      (paints `#000000`), flood fill, line, rect (outline/filled), circle (outline/filled),
      eyedropper. Shape tools show a drag preview, bake on release. Paint edits mutate the frame's
      bitmap layer (canvas → `toDataURL('image/png')`, already RGB565-quantized colors).
-   - **Overlays**: text elements (add/edit/delete; fields text/font/color; drag on canvas or
-     arrow buttons to move). Text renders on-canvas as an approximation (monospace); the preview
-     endpoint shows truth.
+    - **Overlays**: text elements (add/edit/delete; fields text/font/color; drag on canvas or
+      arrow buttons to move). Text renders on-canvas pixel-exact by compositing the server's
+      FONT-page glyphs (`GET fontpage/{font}`, one fetch per font, ACMD TEXT layout rules, a
+      `LatinFoldService` mirror for folding); the bundled TTFs are the offline fallback. The
+      preview endpoint remains rendering truth.
    - **FrameTimeline**: add / duplicate / delete / reorder frames, current index, **onion skin**
      (previous frame bitmap at ~30% alpha, editor-only), 1–60 enforced.
    - **PalettePicker**: 16 fixed RGB565-exact colors + custom color input with quantize feedback.
@@ -309,7 +331,7 @@ The type dropdown, format column, and save path pick `CUSTOM` up automatically v
 | pxd schema drift between TS and Java | This doc is normative; §10 checklist; server validation is the gate (400 messages surface drift immediately) |
 | Strict Jackson rejects config | Record surface is 3 fixed fields; pxd lives inside one string — inner leniency is ours |
 | Big designs bloat jsonb / MQTT | 512 KB design cap; ≤60 frames; ANIMATION already stores comparable inline base64; `uploadId` skip prevents re-uploads |
-| Text overlay approximation misleads | Preview pane is server truth; canvas text is a positioned hint only |
+| Text overlay approximation misleads | Resolved: the canvas composites the server's FONT-page glyphs (§5.10), pixel-exact vs both render paths; preview pane remains server truth; TTF fallback only when the backend is unreachable |
 | Garbage designs stored | Save-time dry-compile validation (§5.8) |
 
 ## 9. Verification
