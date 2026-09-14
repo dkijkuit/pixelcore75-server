@@ -17,11 +17,20 @@ import org.springframework.web.server.ResponseStatusException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class Px75PanelService {
+    /**
+     * The serial doubles as the MQTT topic base ({@code <serial>}, {@code <serial>/cmd},
+     * {@code <serial>/anim/...}) — anything outside {@code [A-Z0-9_-]} could inject topic
+     * separators/wildcards or escape file paths. Enforced on create and update; the entity
+     * uppercases on the way in, so lowercase input is accepted.
+     */
+    static final Pattern SERIAL_PATTERN = Pattern.compile("^[A-Z0-9_-]+$");
+
     final PanelRepository panelRepository;
     final PanelConfigRepository panelConfigRepository;
     final PanelRotationControl panelRotationControl;
@@ -43,7 +52,7 @@ public class Px75PanelService {
     }
 
     public Px75Panel addPx75Panel(final Px75Panel px75Panel) {
-        px75Panel.setSerial(px75Panel.getSerial().toUpperCase());
+        validateSerial(px75Panel.getSerial(), null);
 
         final Px75Panel savedPanel = panelRepository.save(px75Panel);
         panelConfigRepository.save(new Px75PanelConfig(savedPanel.getPanelId(), Collections.emptyList()));
@@ -79,6 +88,19 @@ public class Px75PanelService {
     }
 
     public Px75Panel updatePx75Panel(final Px75Panel px75Panel) {
+        validateSerial(px75Panel.getSerial(), px75Panel.getPanelId());
         return panelRepository.save(px75Panel);
+    }
+
+    private void validateSerial(final String serial, final Long currentPanelId) {
+        if (serial == null || !SERIAL_PATTERN.matcher(serial).matches()) {
+            throw new IllegalArgumentException(
+                    "Panel serial is required and may only contain A-Z, 0-9, '_' and '-'");
+        }
+        panelRepository.findBySerialIgnoreCase(serial)
+                .filter(panel -> currentPanelId == null || !currentPanelId.equals(panel.getPanelId()))
+                .ifPresent(panel -> {
+                    throw new IllegalArgumentException("Panel serial already in use: " + serial);
+                });
     }
 }

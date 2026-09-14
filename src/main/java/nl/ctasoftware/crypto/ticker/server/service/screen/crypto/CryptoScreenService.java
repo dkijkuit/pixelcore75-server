@@ -10,8 +10,6 @@ import nl.ctasoftware.crypto.ticker.server.service.command.AcmdMirror;
 import nl.ctasoftware.crypto.ticker.server.service.command.CommandBatch;
 import nl.ctasoftware.crypto.ticker.server.service.command.FontPageExtractor;
 import nl.ctasoftware.crypto.ticker.server.service.command.Rgb565;
-import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
-import nl.ctasoftware.crypto.ticker.server.service.image.ImageService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.client.CoinCurrency;
 import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.client.CryptoAPIClient;
@@ -20,7 +18,6 @@ import org.springframework.stereotype.Service;
 
 import java.awt.*;
 import java.awt.image.BufferedImage;
-import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Comparator;
@@ -35,65 +32,15 @@ public class CryptoScreenService implements CommandScreenService<CryptoScreenCon
 
     static final Color SPARK_LINE_COLOR = new Color(180, 180, 180);
 
-    final ImageService imageService;
-    final PaintToolsService paintToolsService;
-    final Font miniLineFont8Px;
-    final Font habboFont8Px;
     final Font ledBoardFont8Px;
     final CryptoAPIClient cryptoAPIClient;
 
     /** Extracted FONT page of the ticker font; computed lazily (extraction is deterministic). */
     private volatile FontPageExtractor.FontPage ledBoardPage;
 
-    public CryptoScreenService(final ImageService imageService,
-                               final CryptoAPIClient cryptoAPIClient, final PaintToolsService paintToolsService,
-                               final Font miniLineFont8Px, final Font habboFont8Px, final Font ledBoardFont8Px) {
-        this.imageService = imageService;
+    public CryptoScreenService(final CryptoAPIClient cryptoAPIClient, final Font ledBoardFont8Px) {
         this.cryptoAPIClient = cryptoAPIClient;
-        this.paintToolsService = paintToolsService;
-        this.miniLineFont8Px = miniLineFont8Px;
-        this.habboFont8Px = habboFont8Px;
         this.ledBoardFont8Px = ledBoardFont8Px;
-    }
-
-    private BufferedImage getTickerImageForSymbol(final CryptoClientCurrency currency, final String symbol) throws IOException {
-        final List<CoinPriceHistory> coinPriceHistoryList = cryptoAPIClient.getCoinPriceHistory(currency.name(), symbol);
-        final CoinPricePercentage pricePercentageChangePercentage24H = cryptoAPIClient.getCoinPricePercentage(symbol);
-
-        final CoinPriceHistory highestValue = getHighestPriceValue(coinPriceHistoryList);
-        final CoinPriceHistory lowestValue = getLowestPriceValue(coinPriceHistoryList).orElseThrow();
-
-        final BufferedImage bufferedImage = paintToolsService.newImage();
-        final BigDecimal percentage = getPercentage(pricePercentageChangePercentage24H);
-
-        drawCoinSymbol(bufferedImage, pricePercentageChangePercentage24H);
-        draw24hPercentage(bufferedImage, percentage, pricePercentageChangePercentage24H);
-        drawCurrentPrice(bufferedImage, coinPriceHistoryList, CoinCurrency.getCurrencySymbol(currency));
-        drawSparkline(highestValue, lowestValue, coinPriceHistoryList, bufferedImage);
-
-        return bufferedImage;
-    }
-
-    private void drawSparkline(final CoinPriceHistory highestValue, final CoinPriceHistory lowestValue, final List<CoinPriceHistory> coinPriceHistoryList, final BufferedImage bufferedImage) {
-        final double delta = highestValue.price() - lowestValue.price();
-        final int minIndex = coinPriceHistoryList.size() > 64 ? coinPriceHistoryList.size() - 64 : 0;
-        for (int i = coinPriceHistoryList.size() - 1; i >= minIndex; i--) {
-            final CoinPriceHistory coinPriceHistory = coinPriceHistoryList.get(i);
-            final double relativePrice = 14 - ((coinPriceHistory.price() - lowestValue.price()) / delta) * 14;
-            paintToolsService.drawSparkLine(bufferedImage, i - minIndex, 31, 17 + (int) relativePrice, new Color(180, 180, 180), Color.BLUE);
-        }
-    }
-
-    private void drawCurrentPrice(final BufferedImage bufferedImage, final List<CoinPriceHistory> coinPriceHistoryList, final String currencySymbol) {
-        paintToolsService.drawText(bufferedImage, ledBoardFont8Px, currencySymbol + coinPriceHistoryList.getLast().formattedPrice(), 0, 15, new Color(255, 88, 0));
-    }
-
-    private void draw24hPercentage(final BufferedImage bufferedImage, final BigDecimal percentage, final CoinPricePercentage pricePercentageChangePercentage24H) {
-        paintToolsService.drawTextAlignRight(bufferedImage, ledBoardFont8Px, percentage.toPlainString() + "%", 7, pricePercentageChangePercentage24H.priceChangePercentage24h() < 0 ? Color.RED : Color.GREEN);
-    }
-
-    private void drawCoinSymbol(final BufferedImage bufferedImage, final CoinPricePercentage pricePercentageChangePercentage24H) {
-        paintToolsService.drawText(bufferedImage, ledBoardFont8Px, pricePercentageChangePercentage24H.coinSymbol().toUpperCase(), 0, 7, Color.BLUE);
     }
 
     private static BigDecimal getPercentage(final CoinPricePercentage pricePercentageChangePercentage24H) {
@@ -113,26 +60,14 @@ public class CryptoScreenService implements CommandScreenService<CryptoScreenCon
         return ScreenType.CRYPTO_TICKER;
     }
 
-    @Override
-    public Optional<BufferedImage> renderScreen(final CryptoScreenConfig cryptoScreenConfig) {
-        try {
-            log.info("Next crypto: {}, in currency: {}", cryptoScreenConfig.config().symbol(), cryptoScreenConfig.config().currency());
-            return Optional.of(getTickerImageForSymbol(CryptoClientCurrency.valueOf(cryptoScreenConfig.config().currency()), cryptoScreenConfig.config().symbol()));
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
     /* --------------------------------------------------------------------
      * ACMD command path: the same header texts (symbol / 24h percentage /
      * price) as led-board TEXT, the sparkline as one vertical LINE + PIX per
-     * history point — the identical geometry the frame path's drawSparkLine
-     * paints (gray column from y=31 up to the sample, blue sample pixel on
-     * top). ACMD TEXT payloads are ASCII 32..126 by spec, so the non-ASCII
-     * currency symbols (€/£) BLIT as drawString-rasterized glyphs — the exact
-     * pixels the frame path paints for them, since the TTF carries both —
-     * with the price TEXT starting at the symbol's AWT advance, the frame
-     * path's own pen position within the combined string.
+     * history point (gray column from y=31 up to the sample, blue sample
+     * pixel on top). ACMD TEXT payloads are ASCII 32..126 by spec, so the
+     * non-ASCII currency symbols (€/£) BLIT as drawString-rasterized glyphs —
+     * the TTF carries both — with the price TEXT starting at the symbol's AWT
+     * advance.
      * ------------------------------------------------------------------ */
 
     /** A currency-symbol glyph rasterized via the frame path's AWT pipeline. */
@@ -146,6 +81,7 @@ public class CryptoScreenService implements CommandScreenService<CryptoScreenCon
 
     @Override
     public byte[] renderCommandBatch(final CryptoScreenConfig cryptoScreenConfig) {
+        log.info("Next crypto: {}, in currency: {}", cryptoScreenConfig.config().symbol(), cryptoScreenConfig.config().currency());
         final CryptoClientCurrency currency =
                 CryptoClientCurrency.valueOf(cryptoScreenConfig.config().currency());
         final String symbol = cryptoScreenConfig.config().symbol();

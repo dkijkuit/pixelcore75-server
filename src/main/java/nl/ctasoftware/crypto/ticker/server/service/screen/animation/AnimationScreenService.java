@@ -5,8 +5,7 @@ import nl.ctasoftware.crypto.ticker.server.model.panel.config.AnimationScreenCon
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.FrameScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenType;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.ScreenService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.StaticScreenService;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 
@@ -20,7 +19,7 @@ import java.util.Optional;
 
 @Slf4j
 @Service
-public class AnimationScreenService implements FrameScreenService<AnimationScreenConfig> {
+public class AnimationScreenService implements StaticScreenService<AnimationScreenConfig> {
     public static final int MIN_FRAMES = 2;
 
     /**
@@ -41,7 +40,9 @@ public class AnimationScreenService implements FrameScreenService<AnimationScree
         return renderFrames(screenConfig).stream().findFirst();
     }
 
-    @Cacheable("animations")
+    // Digest key: the default key would be the whole config record (multi-MB base64
+    // frame strings) — re-hashed on every lookup. Same frames → same key → same decode.
+    @Cacheable(cacheNames = "animations", key = "@cacheKeys.digest(#screenConfig.frames())")
     public List<BufferedImage> renderFrames(final AnimationScreenConfig screenConfig) {
         final List<String> frames = screenConfig.frames();
 

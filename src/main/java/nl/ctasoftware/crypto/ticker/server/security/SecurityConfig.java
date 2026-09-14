@@ -41,6 +41,10 @@ public class SecurityConfig {
                 .exceptionHandling(configurer -> configurer.authenticationEntryPoint(unauthorizedHandler))
                 .authorizeHttpRequests(registry -> registry
                         .requestMatchers("/v1/auth/**").permitAll()
+                        // Docker/compose healthcheck target (was a 401 → the container
+                        // reported permanently unhealthy). Unauthenticated by design; it
+                        // returns a static "OK" and leaks nothing.
+                        .requestMatchers("/v1/status").permitAll()
                         // Browser redirect target from Spotify consent: no JWT on that
                         // navigation; the PKCE state check (SpotifyOAuthService) covers it.
                         .requestMatchers("/v1/spotify/oauth/callback").permitAll()

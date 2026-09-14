@@ -1,7 +1,6 @@
 package nl.ctasoftware.crypto.ticker.server.service.screen.spotify;
 
 import lombok.extern.slf4j.Slf4j;
-import nl.ctasoftware.crypto.ticker.server.model.panel.config.FrameScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenType;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.SpotifyScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.service.command.AcmdMirror;
@@ -9,9 +8,7 @@ import nl.ctasoftware.crypto.ticker.server.service.command.CommandBatch;
 import nl.ctasoftware.crypto.ticker.server.service.command.FontPageExtractor;
 import nl.ctasoftware.crypto.ticker.server.service.command.Rgb565;
 import nl.ctasoftware.crypto.ticker.server.service.image.LatinFoldService;
-import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.client.SpotifyAlbumArtClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.client.SpotifyPlaybackClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.client.SpotifyPlaybackClient.SpotifyPlayback;
@@ -20,15 +17,11 @@ import org.springframework.stereotype.Service;
 
 import java.awt.Color;
 import java.awt.Font;
-import java.awt.Graphics;
-import java.awt.image.BufferedImage;
 import java.text.Normalizer;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Optional;
 
 /**
  * Spotify Now Playing (64x32): a 32x32 album-art thumbnail filling the left half
@@ -37,30 +30,26 @@ import java.util.Optional;
  * all driven by the Web API's playback state. Without art (fetch failed) the
  * full-width layout takes over: combined centered time line, full-width bar.
  *
- * <p>The ACMD command path is the primary encoding while a track plays: a ~1KB
- * batch (fonts + BLIT art + text/scroll + the bar as FILLs) republished on a 1s render
- * tick, with fresh playback fetched only on the (slower, rate-limit-aware)
- * refresh cadence — between fetches the cached snapshot's progress is
- * re-projected locally, so the time line and bar move naturally without extra
- * API load and no multi-second frame uploads (an 80-frame inline ANIM takes
- * ~10s at the panel's drain rate, the exact stall this avoids). The frame
- * path stays as the non-ACMD fallback: a per-slot frame loop with the progress
- * interpolated from the slot-start fetch.
+ *  * <p>The ACMD command path is the screen's only encoding: a ~1KB batch (fonts + BLIT
+ * art + text/scroll + the bar as FILLs) republished on a 1s render tick, with fresh
+ * playback fetched only on the (slower, rate-limit-aware) refresh cadence — between
+ * fetches the cached snapshot's progress is re-projected locally, so the time line and
+ * bar move naturally without extra API load and no multi-second frame uploads (an
+ * 80-frame inline ANIM takes ~10s at the panel's drain rate, the exact stall this
+ * avoids).
  *
  * <p>Album art comes from {@link SpotifyAlbumArtClient}: downloaded once per cover
  * URL, downgraded to at most 16 dithered RGB565 colors — exactly BLIT's palette
- * capacity — so the command path BLITs and the frame path paints the identical
- * pixels (parity by construction). Both idle and not-connected states show a
- * generated pixel-art Spotify-logo mark instead of a wordmark.
+ * capacity. Both idle and not-connected states show a generated pixel-art
+ * Spotify-logo mark instead of a wordmark.
  */
 @Slf4j
 @Service
-public class SpotifyScreenService implements FrameScreenService<SpotifyScreenConfig>,
-        CommandScreenService<SpotifyScreenConfig> {
+public class SpotifyScreenService implements CommandScreenService<SpotifyScreenConfig> {
 
-    public static final int DEFAULT_FRAME_DELAY_MS = 250;
+    /** Configured live-refresh cadence (clamped to &ge; 1s: the API is rate-limited). */
+    private final long refreshMs;
 
-    static final int MAX_FRAMES = 200;
     static final int CANVAS_WIDTH = 64;
     static final int CANVAS_HEIGHT = 32;
 
@@ -79,9 +68,6 @@ public class SpotifyScreenService implements FrameScreenService<SpotifyScreenCon
     static final int TOTAL_BASELINE_Y = 29;
     static final int PROGRESS_BAR_Y = 30;
     static final int PROGRESS_BAR_HEIGHT = 2;
-
-    static final int SCROLL_PX_PER_SEC = 12;
-    static final int SCROLL_GAP_PX = 12;
 
     /* --------------------------------------------------------------------
      * ACMD command path (the radar's live-refresh pattern): font page ids are
@@ -109,13 +95,10 @@ public class SpotifyScreenService implements FrameScreenService<SpotifyScreenCon
     /**
      * Render tick while a track plays: batches republish on this grid so the time
      * line advances second by second instead of jumping a whole refresh interval.
-     * Fetches still honor {@code refreshMs} (the client's fetch budget) — ticks
-     * between fetches re-project the cached snapshot's progress locally.
+     * Fetches still honor {@code refreshMs} (the client's fetch budget) — ticks in
+     * between reuse the cached snapshot.
      */
     public static final long RENDER_TICK_MS = 1_000;
-
-    /** Configured live-refresh cadence (clamped to &ge; 1s: the API is rate-limited). */
-    private final long refreshMs;
 
     /** Extracted FONT pages (deterministic per TTF+size), computed on first command render. */
     private volatile FontPageExtractor.FontPage ledBoardPage;
@@ -168,20 +151,17 @@ public class SpotifyScreenService implements FrameScreenService<SpotifyScreenCon
             new SpotifyAlbumArtClient.AlbumArt(LOGO_SIZE,
                     spotifyLogo(Rgb565.of(IDLE_GREY)));
 
-    private final PaintToolsService paintToolsService;
     private final Font ledBoardFont8Px;
     private final Font cgPixel5Px;
     private final SpotifyPlaybackClient spotifyPlaybackClient;
     private final SpotifyAlbumArtClient spotifyAlbumArtClient;
 
-    public SpotifyScreenService(final PaintToolsService paintToolsService,
-                                final Font ledBoardFont8Px,
+    public SpotifyScreenService(final Font ledBoardFont8Px,
                                 final Font cgPixel5Px,
                                 final SpotifyPlaybackClient spotifyPlaybackClient,
                                 final SpotifyAlbumArtClient spotifyAlbumArtClient,
                                 @Value("${pixelcore75.spotify.refresh-ms:" + DEFAULT_REFRESH_MS + "}")
                                 final long refreshMs) {
-        this.paintToolsService = paintToolsService;
         this.ledBoardFont8Px = ledBoardFont8Px;
         this.cgPixel5Px = cgPixel5Px;
         this.spotifyPlaybackClient = spotifyPlaybackClient;
@@ -192,30 +172,6 @@ public class SpotifyScreenService implements FrameScreenService<SpotifyScreenCon
     @Override
     public ScreenType getScreenType() {
         return ScreenType.SPOTIFY_NOW_PLAYING;
-    }
-
-    @Override
-    public Optional<BufferedImage> renderScreen(final SpotifyScreenConfig screenConfig) {
-        final List<BufferedImage> frames = renderFrames(screenConfig);
-        return frames.isEmpty() ? Optional.empty() : Optional.of(frames.getFirst());
-    }
-
-    @Override
-    public List<BufferedImage> renderFrames(final SpotifyScreenConfig screenConfig) {
-        final SpotifyPlayback playback = spotifyPlaybackClient.getCurrentlyPlaying();
-
-        if (!playback.connected()) {
-            return screenConfig.showIdleScreen() ? staticPage(notConnectedPage()) : staticPage(blankPage());
-        }
-        if (!playback.hasTrack()) {
-            return screenConfig.showIdleScreen() ? staticPage(idlePage()) : staticPage(blankPage());
-        }
-        return playingFrames(playback, screenConfig);
-    }
-
-    /** Static content only needs the protocol's 2-frame minimum (the panel loops it). */
-    private static List<BufferedImage> staticPage(final BufferedImage page) {
-        return List.of(page, page);
     }
 
     /* --------------------------------------------------------------------
@@ -417,93 +373,8 @@ public class SpotifyScreenService implements FrameScreenService<SpotifyScreenCon
         return page;
     }
 
-
-    private List<BufferedImage> playingFrames(final SpotifyPlayback playback,
-                                               final SpotifyScreenConfig screenConfig) {
-        final int frameDelayMs = Math.max(FrameScreenConfig.MIN_FRAME_DELAY_MS, screenConfig.frameDelayMs());
-        final long slotMillis = screenConfig.durationSeconds() * 1000L;
-        final int frameCount = frameCount(slotMillis, frameDelayMs);
-
-        // Fold before measuring: the draw path folds too, and accents can change widths.
-        final String title = LatinFoldService.fold(playback.title());
-        final String artist = LatinFoldService.fold(playback.artist());
-        final BufferedImage probe = paintToolsService.newImage();
-        final Graphics probeGraphics = probe.getGraphics();
-        final SpotifyAlbumArtClient.AlbumArt art = albumArt(playback, screenConfig.showAlbumArt());
-        final int textX = art != null ? TEXT_X_WITH_ART : 0;
-        final int textW = art != null ? TEXT_W_WITH_ART : CANVAS_WIDTH;
-        final int titleWidth = textWidth(probeGraphics, ledBoardFont8Px, title);
-        final int artistWidth = textWidth(probeGraphics, cgPixel5Px, artist);
-
-        // Progress base: the API reports progress as of fetchedAt; advance by the
-        // fetch-to-render lag so frame 0 is current, then per frame by the delay.
-        final long fetchLagMs = Math.max(0,
-                Duration.between(playback.fetchedAt(), Instant.now()).toMillis());
-        final String totalTime = formatTime(playback.durationMs());
-
-        final var frames = new ArrayList<BufferedImage>(frameCount);
-        for (int i = 0; i < frameCount; i++) {
-            final long frameElapsedMs = (long) i * frameDelayMs;
-            final long progressMs = progressAtFrame(playback.progressMs(), playback.playing(),
-                    fetchLagMs + frameElapsedMs, playback.durationMs());
-
-            final BufferedImage image = paintToolsService.newImage();
-            if (art != null) {
-                paintRgb565(image, 0, 0, art);
-            }
-            paintToolsService.drawText(image, ledBoardFont8Px, title,
-                    textX + marqueeX(frameElapsedMs, titleWidth, textW), TITLE_BASELINE_Y, Color.WHITE);
-            paintToolsService.drawText(image, cgPixel5Px, artist,
-                    textX + marqueeX(frameElapsedMs, artistWidth, textW), ARTIST_BASELINE_Y,
-                    playback.playing() ? SPOTIFY_GREEN : PAUSED_GREY);
-            if (art != null) {
-                // The elapsed time ticks with the interpolated progress — baking the
-                // slot-start string would freeze "1:23" on screen while the bar moves.
-                paintToolsService.drawText(image, cgPixel5Px, formatTime(progressMs), textX,
-                        ELAPSED_BASELINE_Y, playback.playing() ? Color.WHITE : PAUSED_GREY);
-                paintToolsService.drawText(image, cgPixel5Px, totalTime, textX,
-                        TOTAL_BASELINE_Y, IDLE_GREY);
-                drawProgressBar(image, progressMs, playback.durationMs(), playback.playing(), textX, textW);
-            } else {
-                paintToolsService.drawTextAlignCenter(image, cgPixel5Px,
-                        formatTime(progressMs) + "/" + totalTime, TIME_BASELINE_Y,
-                        playback.playing() ? Color.WHITE : PAUSED_GREY);
-                drawProgressBar(image, progressMs, playback.durationMs(), playback.playing(), 0, CANVAS_WIDTH);
-            }
-            frames.add(image);
-        }
-        return frames;
-    }
-
-    private void drawProgressBar(final BufferedImage image, final long progressMs, final long durationMs,
-                                  final boolean playing, final int x, final int width) {
-        final Graphics g = image.getGraphics();
-        g.setColor(PROGRESS_TRACK);
-        g.fillRect(x, PROGRESS_BAR_Y, width, PROGRESS_BAR_HEIGHT);
-        g.setColor(playing ? SPOTIFY_GREEN : PAUSED_GREY);
-        g.fillRect(x, PROGRESS_BAR_Y, barWidthPx(progressMs, durationMs, width), PROGRESS_BAR_HEIGHT);
-    }
-
-    private BufferedImage idlePage() {
-        final BufferedImage image = paintToolsService.newImage();
-        paintRgb565(image, LOGO_X, LOGO_Y, LOGO_GREEN);
-        paintToolsService.drawTextAlignCenter(image, cgPixel5Px, "NOT PLAYING", TIME_BASELINE_Y, IDLE_GREY);
-        return image;
-    }
-
-    private BufferedImage notConnectedPage() {
-        final BufferedImage image = paintToolsService.newImage();
-        paintRgb565(image, LOGO_X, LOGO_Y, LOGO_GREY);
-        paintToolsService.drawTextAlignCenter(image, cgPixel5Px, "NOT CONNECTED", TIME_BASELINE_Y, Color.RED);
-        return image;
-    }
-
-    private BufferedImage blankPage() {
-        return paintToolsService.newImage();
-    }
-
     /* --------------------------------------------------------------------
-     * Pixel-art Spotify logo + RGB565 painting (shared by both paths)
+     * Pixel-art Spotify logo (BLIT payload for idle/not-connected batches)
      * ------------------------------------------------------------------ */
 
     /**
@@ -521,41 +392,9 @@ public class SpotifyScreenService implements FrameScreenService<SpotifyScreenCon
         return px;
     }
 
-    /** Paints an RGB565 block (e.g. album art or the logo) with the 5&rarr;8 bit expansion. */
-    private static void paintRgb565(final BufferedImage image, final int x0, final int y0,
-                                     final SpotifyAlbumArtClient.AlbumArt art) {
-        for (int y = 0; y < art.size(); y++) {
-            for (int x = 0; x < art.size(); x++) {
-                image.setRGB(x0 + x, y0 + y,
-                        SpotifyAlbumArtClient.expand565(art.rgb565()[y * art.size() + x]));
-            }
-        }
-    }
-
     /* --------------------------------------------------------------------
      * Layout math (static for tests)
      * ------------------------------------------------------------------ */
-
-    /** Frames for a slot: the slot length at the playback delay, clamped to the wire range. */
-    static int frameCount(final long slotMillis, final int frameDelayMs) {
-        final int delay = Math.max(1, frameDelayMs);
-        return (int) Math.max(2, Math.min(MAX_FRAMES, slotMillis / delay));
-    }
-
-    /**
-     * Marquee x for a text of {@code textWidth} px at {@code elapsedMs} into the loop:
-     * 0 (static, left-aligned) when it fits the canvas; otherwise it slides left until
-     * fully out, then re-enters from the right after a gap — both wrap extremes are
-     * off-canvas, so the modulo seam is invisible.
-     */
-    static int marqueeX(final long elapsedMs, final int textWidth, final int canvasWidth) {
-        if (textWidth <= canvasWidth) {
-            return 0;
-        }
-        final int cycle = textWidth + canvasWidth + SCROLL_GAP_PX;
-        final int offset = (int) ((elapsedMs * SCROLL_PX_PER_SEC / 1000) % cycle);
-        return offset <= textWidth ? -offset : cycle - offset;
-    }
 
     /** Playback position to render: frozen when paused, advancing otherwise, clamped to the track length. */
     static long progressAtFrame(final long progressMs, final boolean playing, final long elapsedMs,
@@ -579,9 +418,5 @@ public class SpotifyScreenService implements FrameScreenService<SpotifyScreenCon
     static String formatTime(final long ms) {
         final long totalSeconds = Math.max(0, ms) / 1000;
         return totalSeconds / 60 + ":" + String.format(Locale.ROOT, "%02d", totalSeconds % 60);
-    }
-
-    private static int textWidth(final Graphics g, final Font font, final String text) {
-        return (int) g.getFontMetrics(font).getStringBounds(text, g).getWidth();
     }
 }

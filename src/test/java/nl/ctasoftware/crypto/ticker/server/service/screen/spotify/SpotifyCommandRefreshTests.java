@@ -3,7 +3,6 @@ package nl.ctasoftware.crypto.ticker.server.service.screen.spotify;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenType;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.SpotifyScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.service.command.AcmdMirror;
-import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.client.SpotifyAlbumArtClient;
 import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.client.SpotifyPlaybackClient;
@@ -47,8 +46,7 @@ class SpotifyCommandRefreshTests {
         final Font cgPixel = Font.createFont(Font.TRUETYPE_FONT, new File("assets/fonts/cg-pixel-4x5.ttf"))
                 .deriveFont(5f);
         client = mock(SpotifyPlaybackClient.class);
-        service = new SpotifyScreenService(new PaintToolsService(null, null, ledBoard),
-                ledBoard, cgPixel, client, mock(SpotifyAlbumArtClient.class),
+        service = new SpotifyScreenService(ledBoard, cgPixel, client, mock(SpotifyAlbumArtClient.class),
                 SpotifyScreenService.DEFAULT_REFRESH_MS);
         config = new SpotifyScreenConfig(ScreenType.SPOTIFY_NOW_PLAYING, 20, 250, true);
     }

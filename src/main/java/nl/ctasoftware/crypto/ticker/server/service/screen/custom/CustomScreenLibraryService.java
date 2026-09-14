@@ -14,6 +14,8 @@ import nl.ctasoftware.crypto.ticker.server.repository.CustomScreenRepository;
 import nl.ctasoftware.crypto.ticker.server.repository.PanelConfigRepository;
 import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.user.Px75UserDetailsService;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 
 import javax.imageio.ImageIO;
@@ -105,6 +107,7 @@ public class CustomScreenLibraryService implements CustomScreenResolver {
         entry.setThumbnail(validated.thumbnail());
         entry.setUpdatedAt(Instant.now());
         final Px75CustomScreen saved = customScreenRepository.save(entry);
+        evictHydrationCache(id);
         return CustomScreenDto.detail(saved, saved.getUserId() == user.getId(),
                 ownerNames(List.of(saved)).get(saved.getUserId()), usageCount(id));
     }
@@ -120,6 +123,17 @@ public class CustomScreenLibraryService implements CustomScreenResolver {
             throw new IllegalArgumentException("Custom screen " + id + " belongs to another user");
         }
         customScreenRepository.delete(entry);
+        evictHydrationCache(id);
+    }
+
+    /**
+     * Called from {@code update}/{@code delete} so library edits propagate to the rotation
+     * immediately (the render-path hydration cache would otherwise serve the old design for
+     * the remainder of its short TTL). Method-based so the proxy intercepts the call.
+     */
+    @CacheEvict(cacheNames = "customScreenDesigns", key = "#id")
+    public void evictHydrationCache(final long id) {
+        // no-op body — the annotation does the work
     }
 
     /* ------------------------------------------------------------------
@@ -129,6 +143,8 @@ public class CustomScreenLibraryService implements CustomScreenResolver {
      * ------------------------------------------------------------------ */
 
     @Override
+    @Cacheable(cacheNames = "customScreenDesigns", key = "#config.customScreenId()",
+            condition = "#config.customScreenId() != null && #config.design() == null")
     public CustomScreenConfig hydrate(final CustomScreenConfig config) {
         if (config.design() != null) {
             return config; // inline legacy entry, nothing to resolve

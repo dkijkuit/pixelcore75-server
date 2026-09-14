@@ -7,13 +7,11 @@ import nl.ctasoftware.crypto.ticker.server.service.command.AcmdLayout;
 import nl.ctasoftware.crypto.ticker.server.service.command.AcmdMirror;
 import nl.ctasoftware.crypto.ticker.server.service.command.CommandBatch;
 import nl.ctasoftware.crypto.ticker.server.service.command.FontPageExtractor;
-import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.client.SoccerMatchClient;
 import org.springframework.stereotype.Service;
 
 import java.awt.*;
-import java.awt.image.BufferedImage;
 import java.time.format.DateTimeFormatter;
 import java.util.Optional;
 
@@ -32,7 +30,6 @@ public class SoccerMatchService implements CommandScreenService<SoccerMatchScree
     static final int[] NO_MATCH_BASELINES = {8, 18, 28};
 
     final SoccerMatchClient soccerMatchClient;
-    final PaintToolsService paintToolsService;
     final Font ledBoardFont8Px;
     final Font cgPixel5Px;
     final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd-MM HH:mm");
@@ -41,9 +38,8 @@ public class SoccerMatchService implements CommandScreenService<SoccerMatchScree
     private volatile FontPageExtractor.FontPage ledBoardPage;
     private volatile FontPageExtractor.FontPage cgPixelPage;
 
-    public SoccerMatchService(SoccerMatchClient soccerMatchClient, PaintToolsService paintToolsService, Font ledBoardFont8Px, Font cgPixel5Px) {
+    public SoccerMatchService(SoccerMatchClient soccerMatchClient, Font ledBoardFont8Px, Font cgPixel5Px) {
         this.soccerMatchClient = soccerMatchClient;
-        this.paintToolsService = paintToolsService;
         this.ledBoardFont8Px = ledBoardFont8Px;
         this.cgPixel5Px = cgPixel5Px;
     }
@@ -51,33 +47,6 @@ public class SoccerMatchService implements CommandScreenService<SoccerMatchScree
     @Override
     public ScreenType getScreenType() {
         return ScreenType.SOCCER_MATCH;
-    }
-
-    @Override
-    public Optional<BufferedImage> renderScreen(final SoccerMatchScreenConfig screenConfig) {
-        final Optional<SoccerMatch> soccerMatchOpt = soccerMatchClient.getSoccerMatch(screenConfig.competitionId(), screenConfig.teamId());
-        final BufferedImage matchImage = paintToolsService.newImage();
-
-        if (soccerMatchOpt.isPresent()) {
-            final SoccerMatch soccerMatch = soccerMatchOpt.get();
-            paintToolsService.drawText(matchImage, ledBoardFont8Px, soccerMatch.home().abbreviation(), 1, ABBREV_BASELINE, getShirtColor(soccerMatch.home().color()));
-            paintToolsService.drawTextAlignRight(matchImage, ledBoardFont8Px, soccerMatch.away().abbreviation(), ABBREV_BASELINE, getShirtColor(soccerMatch.away().colorAlternate()));
-
-            if (soccerMatch.started() && !soccerMatch.finished()) {
-                paintToolsService.drawTextAlignCenter(matchImage, cgPixel5Px, soccerMatch.matchTime(), STATUS_BASELINE, Color.CYAN);
-            } else if (soccerMatch.finished()) {
-                paintToolsService.drawTextAlignCenter(matchImage, cgPixel5Px, "Full time", STATUS_BASELINE, Color.CYAN);
-            } else {
-                paintToolsService.drawTextAlignCenter(matchImage, cgPixel5Px, soccerMatch.date().format(formatter), STATUS_BASELINE, Color.CYAN);
-            }
-            paintToolsService.drawTextAlignCenter(matchImage, ledBoardFont8Px, soccerMatch.home().score() + " - " + soccerMatch.away().score(), SCORE_BASELINE, Color.WHITE);
-        } else {
-            paintToolsService.drawTextAlignCenter(matchImage, cgPixel5Px, "No match for", NO_MATCH_BASELINES[0], Color.BLUE);
-            paintToolsService.drawTextAlignCenter(matchImage, cgPixel5Px, "id: " + screenConfig.teamId(), NO_MATCH_BASELINES[1], Color.BLUE);
-            paintToolsService.drawTextAlignCenter(matchImage, cgPixel5Px, screenConfig.competitionId(), NO_MATCH_BASELINES[2], Color.BLUE);
-        }
-
-        return Optional.of(matchImage);
     }
 
     public Color getShirtColor(String color) {

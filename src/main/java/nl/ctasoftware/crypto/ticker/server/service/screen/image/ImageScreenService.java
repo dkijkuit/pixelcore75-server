@@ -4,7 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ImageScreenConfig;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenType;
 import nl.ctasoftware.crypto.ticker.server.service.image.ImageService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.ScreenService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.StaticScreenService;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 
@@ -18,7 +18,7 @@ import java.util.Optional;
 
 @Slf4j
 @Service
-public class ImageScreenService implements ScreenService<ImageScreenConfig> {
+public class ImageScreenService implements StaticScreenService<ImageScreenConfig> {
     final ImageService imageService;
 
     public ImageScreenService(final ImageService imageService) {
@@ -31,7 +31,9 @@ public class ImageScreenService implements ScreenService<ImageScreenConfig> {
     }
 
     @Override
-    @Cacheable("images")
+    // Digest key: the default key would be the whole config record (a multi-MB base64
+    // string) — re-hashed on every lookup. Same content → same key → same cached frame.
+    @Cacheable(cacheNames = "images", key = "@cacheKeys.digest(#screenConfig.imageUploadData())")
     public Optional<BufferedImage> renderScreen(ImageScreenConfig screenConfig) {
         log.info("Loading image: {}", screenConfig.image());
 

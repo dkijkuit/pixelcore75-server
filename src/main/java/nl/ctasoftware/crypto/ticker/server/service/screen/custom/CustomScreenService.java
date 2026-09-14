@@ -11,6 +11,7 @@ import nl.ctasoftware.crypto.ticker.server.service.image.LatinFoldService;
 import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.StaticScreenService;
 import org.springframework.stereotype.Service;
 
 import java.awt.Color;
@@ -29,7 +30,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Service
-public class CustomScreenService implements FrameScreenService<CustomScreenConfig>, CommandScreenService<CustomScreenConfig> {
+public class CustomScreenService implements FrameScreenService<CustomScreenConfig>,
+        StaticScreenService<CustomScreenConfig>, CommandScreenService<CustomScreenConfig> {
 
     /** Preview sampling cadence for parametric designs — the SSE command tick, spec §3.6. */
     static final int COMMAND_PREVIEW_TICK_MS = 100;
@@ -115,8 +117,7 @@ public class CustomScreenService implements FrameScreenService<CustomScreenConfi
     public byte[] renderCommandBatch(final CustomScreenConfig screenConfig) {
         final PxdDesign design = PxdDesign.parse(screenConfig.design());
         if (!design.hasParametrics()) {
-            // The job gates on commandCapable; reaching here is a wiring bug, and the
-            // job's buildCommandBatches catch turns it into the frame path.
+            // The job gates on commandCapable; reaching here is a wiring bug.
             throw new IllegalStateException("only parametric designs compile to commands");
         }
         return renderCommandBatchOf(design);
@@ -269,7 +270,7 @@ public class CustomScreenService implements FrameScreenService<CustomScreenConfi
 
     /* ------------------------------------------------------------------
      * Frame compile (all designs; parametric layers bake their t=0 pose,
-     * spec §3.6 — the flag-off fallback, thumbnail and SSE render)
+     * spec §3.6 — thumbnail and preview render)
      * ------------------------------------------------------------------ */
 
     private List<BufferedImage> compileFrames(final PxdDesign design) {

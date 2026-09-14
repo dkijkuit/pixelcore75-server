@@ -8,7 +8,6 @@ import nl.ctasoftware.crypto.ticker.server.service.command.AcmdMirror;
 import nl.ctasoftware.crypto.ticker.server.service.command.CommandBatch;
 import nl.ctasoftware.crypto.ticker.server.service.command.FontPageExtractor;
 import nl.ctasoftware.crypto.ticker.server.service.command.Rgb565;
-import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
 import org.springframework.stereotype.Service;
 
@@ -20,7 +19,6 @@ import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.Optional;
 
 @Slf4j
 @Service
@@ -31,7 +29,6 @@ public class DateScreenService implements CommandScreenService<DateScreenConfig>
     static final int CALENDAR_Y = 5;
     static final int DATE_BASELINE = 27;
 
-    final PaintToolsService paintToolsService;
     final Font grinched7Px;
     final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd MMM yyyy");
     final BufferedImage calendarImage;
@@ -42,8 +39,7 @@ public class DateScreenService implements CommandScreenService<DateScreenConfig>
     /** Extracted FONT page of the date font; computed lazily (extraction is deterministic). */
     private volatile FontPageExtractor.FontPage grinchedPage;
 
-    public DateScreenService(PaintToolsService paintToolsService, Font grinched7Px) {
-        this.paintToolsService = paintToolsService;
+    public DateScreenService(Font grinched7Px) {
         this.grinched7Px = grinched7Px;
         try{
             this.calendarImage = ImageIO.read(new File("assets/calendar/calendar11px.png"));
@@ -58,21 +54,9 @@ public class DateScreenService implements CommandScreenService<DateScreenConfig>
         return ScreenType.DATE;
     }
 
-    @Override
-    public Optional<BufferedImage> renderScreen(final DateScreenConfig screenConfig) {
-        final LocalDateTime now = now(ZoneId.systemDefault());
-        final BufferedImage dateImage = paintToolsService.newImage();
-        final String date = formatter.format(now);
-
-        paintToolsService.drawImage(dateImage, calendarImage, CALENDAR_X, CALENDAR_Y);
-        paintToolsService.drawTextAlignCenter(dateImage, grinched7Px, date, DATE_BASELINE, Color.decode(screenConfig.color()));
-
-        return Optional.of(dateImage);
-    }
-
     /**
-     * Time source of both render paths; protected so parity tests can freeze the date
-     * and render golden frames and the command batch from the identical timestamp.
+     * Time source of the render; protected so tests can freeze the date and render
+     * golden batches from a deterministic timestamp.
      */
     protected LocalDateTime now(final ZoneId zone) {
         return LocalDateTime.now(zone);

@@ -7,7 +7,6 @@ import nl.ctasoftware.crypto.ticker.server.service.command.AcmdMirror;
 import nl.ctasoftware.crypto.ticker.server.service.command.CommandBatch;
 import nl.ctasoftware.crypto.ticker.server.service.command.FontPageExtractor;
 import nl.ctasoftware.crypto.ticker.server.service.command.Rgb565;
-import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
 import org.springframework.stereotype.Service;
 
@@ -19,7 +18,6 @@ import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.Optional;
 
 @Slf4j
 @Service
@@ -32,24 +30,22 @@ public class ClockScreenService implements CommandScreenService<ClockScreenConfi
     static final int CLOCK_FACE_Y = 5;
     static final int CLOCK_TEXT_BASELINE = 27;
 
-    final PaintToolsService paintToolsService;
     final Font ledBoardFont8Px;
     final DateTimeFormatter formatterAmPm = DateTimeFormatter.ofPattern("hh:mm a");
     final DateTimeFormatter formatter24Hr = DateTimeFormatter.ofPattern("HH:mm");
     final BufferedImage clockImage;
 
     /**
-     * The clock face as w&times;h RGB565 pixels (transparent pixels &rarr; black, the same
-     * composite the frame path's black canvas produces) — 14 distinct colors after
-     * quantization, inside BLIT's 16-entry palette, so the face blits byte-exactly.
+     * The clock face as w&times;h RGB565 pixels (transparent pixels &rarr; black) — 14
+     * distinct colors after quantization, inside BLIT's 16-entry palette, so the face
+     * blits byte-exactly.
      */
     final int[] clockFace565;
 
     /** Extracted FONT page of the time font; computed lazily (extraction is deterministic). */
     private volatile FontPageExtractor.FontPage ledBoardPage;
 
-    public ClockScreenService(final PaintToolsService paintToolsService, final Font ledBoardFont8Px) {
-        this.paintToolsService = paintToolsService;
+    public ClockScreenService(final Font ledBoardFont8Px) {
         this.ledBoardFont8Px = ledBoardFont8Px;
         try {
             this.clockImage = ImageIO.read(new File("assets/clock/clock.png"));
@@ -64,21 +60,9 @@ public class ClockScreenService implements CommandScreenService<ClockScreenConfi
         return ScreenType.CLOCK;
     }
 
-    @Override
-    public Optional<BufferedImage> renderScreen(final ClockScreenConfig screenConfig) {
-        final LocalDateTime now = now(ZoneId.of(screenConfig.timezone()));
-        final BufferedImage timeImage = paintToolsService.newImage();
-        final String time = screenConfig.format24hr() ? formatter24Hr.format(now) : formatterAmPm.format(now);
-
-        paintToolsService.drawImage(timeImage, clockImage, CLOCK_FACE_X, CLOCK_FACE_Y);
-        paintToolsService.drawTextAlignCenter(timeImage, ledBoardFont8Px, time, CLOCK_TEXT_BASELINE, Color.decode(screenConfig.color()));
-
-        return Optional.of(timeImage);
-    }
-
     /**
-     * Time source of both render paths; protected so parity tests can freeze the clock
-     * and render golden frames and the command batch from the identical timestamp.
+     * Time source of the render; protected so tests can freeze the clock and render
+     * golden batches from a deterministic timestamp.
      */
     protected LocalDateTime now(final ZoneId zone) {
         return LocalDateTime.now(zone);

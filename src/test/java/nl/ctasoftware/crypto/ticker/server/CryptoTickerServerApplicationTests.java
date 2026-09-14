@@ -14,7 +14,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * The old contract (live compose Postgres + NanoMQ required for tests) is gone.
  */
 @Testcontainers(disabledWithoutDocker = true)
-@SpringBootTest
+@SpringBootTest(properties = "jobrunr.dashboard.enabled=false")
 class CryptoTickerServerApplicationTests {
 
 	@Container

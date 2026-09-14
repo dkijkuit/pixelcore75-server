@@ -16,20 +16,9 @@ import nl.ctasoftware.crypto.ticker.server.service.panel.Px75PanelConfigService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.ScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.AircraftScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.animation.AnimationScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.clock.ClockScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.crypto.CryptoScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.custom.CustomScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.date.DateScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.formula1.Formula1ScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.image.ImageScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.soccer.SoccerMatchService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.spotify.SpotifyScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.weather.WeatherScreenService;
+import nl.ctasoftware.crypto.ticker.server.service.screen.StaticScreenService;
 import org.jobrunr.jobs.annotations.Job;
 import org.jobrunr.scheduling.JobScheduler;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.awt.image.BufferedImage;
@@ -71,14 +60,6 @@ public class PanelRotationJob {
     private final MqttTransport mqttTransport;
     private final ImageService imageService;
 
-    /**
-     * {@code pixelcore75.command-encoding.enabled} (default false): screens whose service
-     * implements {@link CommandScreenService} render as ACMD batches on {@code <serial>/cmd}
-     * instead of frames/static images. Opt-in for the mixed fleet: old firmware never
-     * subscribes to {@code /cmd}, so emission must stay off until a panel runs ACMD firmware.
-     */
-    private final boolean commandEncodingEnabled;
-
     public PanelRotationJob(final PanelRepository panelRepository,
                             final Px75PanelConfigService px75PanelConfigService,
                             final ScreenServices screenServices,
@@ -89,8 +70,7 @@ public class PanelRotationJob {
                             final RotationStateService rotationStateService,
                             final JobScheduler jobScheduler,
                             final MqttTransport mqttTransport,
-                            final ImageService imageService,
-                            @Value("${pixelcore75.command-encoding.enabled:false}") final boolean commandEncodingEnabled) {
+                            final ImageService imageService) {
         this.panelRepository = panelRepository;
         this.px75PanelConfigService = px75PanelConfigService;
         this.screenServices = screenServices;
@@ -102,7 +82,6 @@ public class PanelRotationJob {
         this.jobScheduler = jobScheduler;
         this.mqttTransport = mqttTransport;
         this.imageService = imageService;
-        this.commandEncodingEnabled = commandEncodingEnabled;
     }
 
     /**
@@ -189,13 +168,13 @@ public class PanelRotationJob {
 
         log.debug("------> Rendering screen {} for panel serial {}", screenConfig.screenType(), serial);
 
-        // ACMD command path (plan §6): flag ON + the service implements it and declares this
+        // ACMD command path (plan §6): the screen's service implements it and declares this
         // config command-capable (CUSTOM: only parametric designs) → publish the first batch
         // to <serial>/cmd (multi-page screens cycle their further batches at each page dwell;
-        // live screens refresh theirs on the refresh grid). Batch build failures fall back to
-        // the screen's regular path (the flag is a fleet-wide toggle, a single screen must not
-        // break a slot).
-        if (commandEncodingEnabled && screenService instanceof CommandScreenService<?>
+        // live screens refresh theirs on the refresh grid). This is the only path for every
+        // command-capable screen — a batch build failure logs and the slot shows nothing new
+        // (the panel holds its previous screen) rather than degrading to an inferior encoding.
+        if (screenService instanceof CommandScreenService<?>
                 && animationTransport.commandCapable(screenConfig.screenType(), screenConfig)) {
             @SuppressWarnings("unchecked")
             final CommandScreenService<ScreenConfig> capableService =
@@ -214,27 +193,32 @@ public class PanelRotationJob {
             }
         }
 
-        if (screenConfig instanceof FrameScreenConfig frameScreenConfig && frameScreenConfig.producesFrames()) {
-            renderFrameScreen(serial, jobId, epoch,
-                    (FrameScreenService) screenService, frameScreenConfig, screens, screenIdx);
+        // Frame path: user-uploaded bitmap streams (ANIMATION gifs, multi-frame CUSTOM
+        // designs) played back through the panel's animation slots.
+        if (screenService instanceof FrameScreenService<?>
+                && screenConfig instanceof FrameScreenConfig frameScreenConfig && frameScreenConfig.producesFrames()) {
+            @SuppressWarnings("unchecked")
+            final FrameScreenService<FrameScreenConfig> frameService =
+                    (FrameScreenService<FrameScreenConfig>) screenService;
+            renderFrameScreen(serial, jobId, epoch, frameService, frameScreenConfig, screens, screenIdx);
             return;
         }
 
-        final Optional<BufferedImage> screenImage = switch (screenConfig) {
-            case WeatherScreenConfig w -> ((WeatherScreenService) screenService).renderScreen(w);
-            case CryptoScreenConfig c -> ((CryptoScreenService) screenService).renderScreen(c);
-            case ImageScreenConfig i -> ((ImageScreenService) screenService).renderScreen(i);
-            case SoccerMatchScreenConfig i -> ((SoccerMatchService) screenService).renderScreen(i);
-            case ClockScreenConfig i -> ((ClockScreenService) screenService).renderScreen(i);
-            case DateScreenConfig i -> ((DateScreenService) screenService).renderScreen(i);
-            case Formula1ScreenConfig i -> ((Formula1ScreenService) screenService).renderScreen(i);
-            case AircraftScreenConfig a -> ((AircraftScreenService) screenService).renderScreen(a);
-            case SpotifyScreenConfig s -> ((SpotifyScreenService) screenService).renderScreen(s);
-            case AnimationScreenConfig a -> ((AnimationScreenService) screenService).renderScreen(a);
-            case CustomScreenConfig c -> ((CustomScreenService) screenService).renderScreen(c);
-        };
+        // Retained static frame: single-image screens (IMAGE, single-frame CUSTOM designs).
+        if (screenService instanceof StaticScreenService<?>) {
+            final Optional<BufferedImage> screenImage = staticImage((StaticScreenService<ScreenConfig>) screenService, screenConfig);
+            screenImage.ifPresent(image -> sendImageToPanel(serial, epoch, image));
+            return;
+        }
 
-        screenImage.ifPresent(image -> sendImageToPanel(serial, epoch, image));
+        log.warn("Screen {} on panel {} has nothing to display (no capable render path); holding the previous screen",
+                screenConfig.screenType(), panelId);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Optional<BufferedImage> staticImage(final StaticScreenService<ScreenConfig> service,
+                                                       final ScreenConfig screenConfig) {
+        return service.renderScreen(screenConfig);
     }
 
     private <T extends FrameScreenConfig> void renderFrameScreen(final String serial, final String jobId,

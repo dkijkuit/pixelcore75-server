@@ -26,6 +26,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Slf4j
 @RestController
@@ -69,19 +70,29 @@ public class PanelController {
 
     @GetMapping
     List<Px75PanelDto> getPanels(@AuthenticationPrincipal Px75User userDetails) {
-        if (userDetails.getRoles().contains(Px75Role.ADMIN)) {
-            return px75PanelService.getPx75Panels().stream().map(px75Panel -> {
-                final Px75PanelConfig panelConfig = px75PanelConfigService.getPanelConfig(px75Panel.getPanelId());
-                final Px75User px75UserById = userDetailsService.getPx75UserById(px75Panel.getUserId());
-                return Px75PanelDto.from(px75Panel, panelConfig, px75UserById.getUsername());
-            }).toList();
-        } else {
-            return px75PanelService.getPx75PanelsForUser(userDetails).stream()
-                    .map(px75Panel -> {
-                        final Px75PanelConfig panelConfig = px75PanelConfigService.getPanelConfig(px75Panel.getPanelId());
-                        return Px75PanelDto.from(px75Panel, panelConfig, userDetails.getUsername());
-                    }).toList();
-        }
+        final boolean admin = userDetails.getRoles().contains(Px75Role.ADMIN);
+        final List<Px75Panel> panels = admin
+                ? px75PanelService.getPx75Panels()
+                : px75PanelService.getPx75PanelsForUser(userDetails);
+
+        // Batch the per-panel lookups: this endpoint used to run one config query and
+        // one user query PER panel (N+1).
+        final Map<Long, Px75PanelConfig> configs = px75PanelConfigService.getConfigs(
+                panels.stream().map(Px75Panel::getPanelId).toList());
+        final Map<Long, Px75User> owners = admin
+                ? userDetailsService.getPx75UsersByIds(
+                        panels.stream().map(Px75Panel::getUserId).collect(Collectors.toSet()))
+                : Map.of();
+
+        return panels.stream().map(panel -> {
+            final Px75PanelConfig panelConfig = configs.get(panel.getPanelId());
+            if (admin) {
+                final Px75User owner = owners.get(panel.getUserId());
+                return Px75PanelDto.from(panel, panelConfig,
+                        owner != null ? owner.getUsername() : null);
+            }
+            return Px75PanelDto.from(panel, panelConfig, userDetails.getUsername());
+        }).toList();
     }
 
     @PostMapping("config")

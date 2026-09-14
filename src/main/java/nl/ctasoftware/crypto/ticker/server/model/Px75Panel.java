@@ -21,7 +21,10 @@ public class Px75Panel {
     private Long userId;
 
     @Setter(AccessLevel.NONE)
-    @Column(name = "serial", nullable = false)
+    // unique is documentation here (ddl-auto: validate does not enforce it) — the real
+    // constraint is the Flyway migration V2__panel_serial_unique.sql, and the service
+    // validates format + duplicates before any save.
+    @Column(name = "serial", nullable = false, unique = true)
     private String serial;
 
     @Column(name = "client_mac", nullable = false, length = 17)

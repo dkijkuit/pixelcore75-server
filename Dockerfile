@@ -36,9 +36,10 @@ COPY --from=build /out/app.jar /app/app.jar
 
 EXPOSE 8080
 
-# Simple health check against root (adjust if you have a dedicated health endpoint)
+# Health check against the permitAll /v1/status endpoint (the root path answers
+# 401 → wget exits non-zero → the container would be permanently unhealthy)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s CMD \
-  wget -qO- http://localhost:${SERVER_PORT}/ || exit 1
+  wget -qO- http://localhost:${SERVER_PORT}/v1/status || exit 1
 
 # Use server.port if the app is Spring Boot; otherwise it's harmless
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -Dserver.port=${SERVER_PORT} -jar /app/app.jar"]

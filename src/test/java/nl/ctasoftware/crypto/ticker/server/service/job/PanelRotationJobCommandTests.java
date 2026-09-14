@@ -58,7 +58,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * The rotation pipeline's ACMD command branch (plan §6), docker-free against a mocked
- * MQTT transport: flag ON + {@link CommandScreenService} → exactly one QoS-0 not-retained
+ * MQTT transport: {@link CommandScreenService} → exactly one QoS-0 not-retained
  * {@code <serial>/cmd} publish of a parseable batch, the retained base image cleared,
  * no ANIM traffic, staging skipped for command screens. Flag OFF (or a non-command
  * screen) → the frame/static path byte-for-byte and zero {@code /cmd} publishes.
@@ -159,18 +159,11 @@ class PanelRotationJobCommandTests {
     /* ------------------------------------------------------------------ */
 
     /**
-     * A clock screen that can render both ways (command batch = CLS + SWEEP). Extends
-     * {@code ClockScreenService} because the static-path switch casts to the concrete
-     * service classes.
+     * A clock screen rendering via commands (CLS + SWEEP).
      */
     private static final class StubClockService extends ClockScreenService {
         StubClockService() {
-            super(new PaintToolsService(null, null, null), null);
-        }
-
-        @Override
-        public java.util.Optional<BufferedImage> renderScreen(final ClockScreenConfig screenConfig) {
-            return java.util.Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
+            super(null);
         }
 
         @Override
@@ -185,11 +178,6 @@ class PanelRotationJobCommandTests {
         @Override
         public ScreenType getScreenType() {
             return ScreenType.NEARBY_AIRCRAFT;
-        }
-
-        @Override
-        public java.util.Optional<BufferedImage> renderScreen(final AircraftScreenConfig screenConfig) {
-            return java.util.Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
         }
 
         @Override
@@ -209,11 +197,6 @@ class PanelRotationJobCommandTests {
         @Override
         public ScreenType getScreenType() {
             return ScreenType.NEARBY_AIRCRAFT;
-        }
-
-        @Override
-        public java.util.Optional<BufferedImage> renderScreen(final ScreenConfig screenConfig) {
-            return java.util.Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
         }
 
         @Override
@@ -281,11 +264,6 @@ class PanelRotationJobCommandTests {
         }
 
         @Override
-        public java.util.Optional<BufferedImage> renderScreen(final ScreenConfig screenConfig) {
-            return java.util.Optional.of(new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
-        }
-
-        @Override
         public byte[] renderCommandBatch(final ScreenConfig screenConfig) {
             return CommandBatch.builder().cls(0x0000)
                     .pix(10, 10 + renders.incrementAndGet(), 0x07E0).build();
@@ -301,9 +279,9 @@ class PanelRotationJobCommandTests {
     /* ------------------------------------------------------------------ */
 
     @Test
-    void flagOnPublishesCommandBatchToCmdTopicAndClearsRetainedBase() {
+    void publishesCommandBatchToCmdTopicAndClearsRetainedBase() {
         jobConfigs = List.of(clockConfig());
-        runSlot(newJob(true, new StubClockService()));
+        runSlot(newJob(new StubClockService()));
 
         assertEquals(2, pubs.size(), "exactly the retained clear + the command batch");
         assertEquals(SERIAL, pubs.get(0).topic());
@@ -324,20 +302,7 @@ class PanelRotationJobCommandTests {
     }
 
     @Test
-    void flagOffUsesStaticFramePathAndNeverTouchesCmd() {
-        jobConfigs = List.of(clockConfig());
-        runSlot(newJob(false, new StubClockService()));
-
-        assertEquals(1, pubs.size(), "one static retained frame publish, nothing else");
-        assertEquals(SERIAL, pubs.getFirst().topic());
-        assertTrue(pubs.getFirst().retained());
-        assertTrue(pubs.getFirst().payload().length > 0, "static frame payload");
-        assertTrue(pubs.stream().noneMatch(p -> p.topic().endsWith("/cmd")),
-                "flag OFF must never publish to /cmd");
-    }
-
-    @Test
-    void flagOnWithFrameScreenKeepsFramePathByteForByte() {
+    void nonCommandScreenKeepsFramePathByteForByte() {
         @SuppressWarnings("unchecked")
         final FrameScreenService<AnimationScreenConfig> animationService = mock(FrameScreenService.class);
         when(animationService.getScreenType()).thenReturn(ScreenType.ANIMATION);
@@ -349,10 +314,10 @@ class PanelRotationJobCommandTests {
         ackUploads = true;
         jobConfigs = List.of(new AnimationScreenConfig(ScreenType.ANIMATION, 1, 50, List.of("f1", "f2")));
 
-        runSlot(newJob(true, animationService));
+        runSlot(newJob(animationService));
 
         assertEquals(1, pubs(p -> p.topic().equals(SERIAL + AnimationTransport.ANIM_START_TOPIC)).size(),
-                "flag ON on a non-command screen must upload the animation as before");
+                "a non-command screen uploads its animation as before");
         assertEquals(2, pubs(p -> p.topic().equals(SERIAL + AnimationTransport.ANIM_FRAME_TOPIC)).size());
         assertTrue(pubs.stream().noneMatch(p -> p.topic().endsWith("/cmd")),
                 "a screen without CommandScreenService never reaches /cmd");
@@ -361,7 +326,7 @@ class PanelRotationJobCommandTests {
     @Test
     void stagingSkipsFrameUploadWhenNextScreenRendersViaCommands() {
         jobConfigs = List.of(clockConfig(), radarConfig());
-        final PanelRotationJob job = newJob(true, new StubClockService(), new StubRadarService());
+        final PanelRotationJob job = newJob(new StubClockService(), new StubRadarService());
 
         final String jobId = runSlot(job); // clock boundary: radar would normally stage its frame stream here
 
@@ -378,9 +343,9 @@ class PanelRotationJobCommandTests {
     }
 
     @Test
-    void capableCustomDesignRendersViaCommandsFlagOn() {
+    void capableCustomDesignRendersViaCommands() {
         jobConfigs = List.of(customConfig(SINGLE_FRAME_DESIGN));
-        runSlot(newJob(true, new StubCustomService(true)));
+        runSlot(newJob(new StubCustomService(true)));
 
         assertEquals(2, pubs.size(), "retained clear + the command batch");
         assertEquals(SERIAL + "/cmd", pubs.get(1).topic());
@@ -393,7 +358,7 @@ class PanelRotationJobCommandTests {
         // Flag ON and the CUSTOM service implements CommandScreenService — but this design
         // is not command-capable: a single-frame design takes the static retained path...
         jobConfigs = List.of(customConfig(SINGLE_FRAME_DESIGN));
-        runSlot(newJob(true, new StubCustomService(false)));
+        runSlot(newJob(new StubCustomService(false)));
 
         assertEquals(1, pubs.size(), "one static retained frame publish, nothing else");
         assertEquals(SERIAL, pubs.getFirst().topic());
@@ -407,7 +372,7 @@ class PanelRotationJobCommandTests {
         ackUploads = true;
         // ...and a multi-frame design still stages its ANIM upload for the next boundary.
         jobConfigs = List.of(clockConfig(), customConfig(TWO_FRAME_DESIGN));
-        final PanelRotationJob job = newJob(true, new StubClockService(), new StubCustomService(false));
+        final PanelRotationJob job = newJob(new StubClockService(), new StubCustomService(false));
 
         runSlot(job); // clock boundary: stage the custom animation
 
@@ -421,9 +386,9 @@ class PanelRotationJobCommandTests {
     }
 
     @Test
-    void flagOnCyclesCommandPagesAtTheDwellUntilTheSlotEnds() throws Exception {
+    void cyclesCommandPagesAtTheDwellUntilTheSlotEnds() throws Exception {
         jobConfigs = List.of(pagedConfig());
-        runSlot(newJob(true, new StubPagedService()));
+        runSlot(newJob(new StubPagedService()));
 
         // Initial page publishes synchronously; the flip to page 2 lands within a
         // preview tick after the 300 ms dwell.
@@ -445,9 +410,9 @@ class PanelRotationJobCommandTests {
     }
 
     @Test
-    void flagOnRefreshesTheCommandBatchUntilTheSlotEnds() throws Exception {
+    void refreshesTheCommandBatchUntilTheSlotEnds() throws Exception {
         jobConfigs = List.of(radarConfig());
-        runSlot(newJob(true, new StubRefreshingService()));
+        runSlot(newJob(new StubRefreshingService()));
 
         // 1 s slot on a 300 ms grid: the first batch plus refreshes at 300/600/900 ms.
         final long deadline = System.currentTimeMillis() + 3_000;
@@ -496,27 +461,25 @@ class PanelRotationJobCommandTests {
         return pubs.stream().filter(filter).toList();
     }
 
-    private PanelRotationJob newJob(final boolean enabled, final ScreenService<? extends ScreenConfig> first,
+    private PanelRotationJob newJob(final ScreenService<? extends ScreenConfig> first,
                                     final ScreenService<? extends ScreenConfig> second) {
-        return buildJob(enabled, List.of(first, second));
+        return buildJob(List.of(first, second));
     }
 
-    private PanelRotationJob newJob(final boolean enabled,
-                                    final ScreenService<? extends ScreenConfig> service) {
-        return buildJob(enabled, List.of(service));
+    private PanelRotationJob newJob(final ScreenService<? extends ScreenConfig> service) {
+        return buildJob(List.of(service));
     }
 
-    private PanelRotationJob buildJob(final boolean enabled,
-                                      final List<ScreenService<? extends ScreenConfig>> services) {
+    private PanelRotationJob buildJob(final List<ScreenService<? extends ScreenConfig>> services) {
         final ScreenServices screenServices = new ScreenServices(new ArrayList<>(services));
         final RotationPlanner planner = new RotationPlanner(config -> config);
         final AnimationTransport transport = new AnimationTransport(
-                imageService, ackService, screenServices, rotationStateService, mqttTransport, enabled);
+                imageService, ackService, screenServices, rotationStateService, mqttTransport);
         final PreviewStreamer previewStreamer = new PreviewStreamer(imageService, broadcaster, rotationStateService);
         final CommandPublisher commandPublisher = new CommandPublisher(mqttTransport, rotationStateService, previewStreamer);
         return new PanelRotationJob(panelRepository, panelConfigService, screenServices, planner,
                 transport, commandPublisher, previewStreamer, rotationStateService,
-                jobScheduler, mqttTransport, imageService, enabled);
+                jobScheduler, mqttTransport, imageService);
     }
 
     private static ClockScreenConfig clockConfig() {

@@ -54,6 +54,16 @@ public class ClientCacheConfiguration {
                 .expireAfterWrite(15, TimeUnit.MINUTES)
                 .build());
 
+        // CUSTOM library designs, read by the rotation's per-cycle hydration (RotationPlanner
+        // → CustomScreenResolver): without this every panel pays one findById per referenced
+        // library screen per cycle (~20 queries/min/panel). Short TTL — library saves/delete
+        // evict explicitly, so this only bounds the staleness from any other path.
+        cacheManager.registerCustomCache("customScreenDesigns", Caffeine.newBuilder()
+                .initialCapacity(1)
+                .maximumSize(1000)
+                .expireAfterWrite(10, TimeUnit.SECONDS)
+                .build());
+
         cacheManager.registerCustomCache("coingeckoPricePercentage", Caffeine.newBuilder()
                 .initialCapacity(1)
                 .maximumSize(100)

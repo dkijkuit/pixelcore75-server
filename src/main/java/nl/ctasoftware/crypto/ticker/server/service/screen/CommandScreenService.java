@@ -16,10 +16,10 @@ import java.util.function.Supplier;
  * one where their regions overlap. An identical-parametric-sequence republish carries
  * the previous epoch (phases continue across refreshes); any change re-arms all of them.
  *
- * <p>Both render paths stay implemented: the job picks the command path only while
- * {@code pixelcore75.command-encoding.enabled} is true, and falls back to this service's
- * frame/static path otherwise (or when the batch build fails). The command path must
- * reproduce the frame path's look via commands — golden-image parity tests pin it.
+ * <p>The command path is the screen's only rendering path: the job routes every config
+ * with {@code commandCapable == true} here (bitmap screens — ANIMATION, IMAGE, and
+ * non-parametric CUSTOM designs — keep the static/ANIM paths instead; see
+ * {@code StaticScreenService}).</p>
  */
 public interface CommandScreenService<T extends ScreenConfig> extends ScreenService<T> {
 
@@ -30,12 +30,12 @@ public interface CommandScreenService<T extends ScreenConfig> extends ScreenServ
     byte[] renderCommandBatch(T screenConfig);
 
     /**
-     * Whether this specific config renders via commands. Services where the command path is
-     * the better or only faithful encoding for every config (CLOCK, NEARBY_AIRCRAFT) keep the
-     * default; a service with a per-config choice (CUSTOM: only designs carrying parametric
-     * layers — pxd spec §3.6 — profit from commands; static/animation designs keep the
-     * retained-frame/ANIM paths) overrides this so the job gates the command branch without a
-     * failing batch build (and without skipping ANIM staging for frame designs).
+     * Whether this specific config renders via commands. Services whose every config
+     * encodes as commands keep the default; a service with a per-config choice (CUSTOM:
+     * only designs carrying parametric layers — pxd spec §3.6 — profit from commands;
+     * static/animation designs keep the retained-frame/ANIM paths) overrides this so the
+     * job gates the command branch without a failing batch build (and without skipping
+     * ANIM staging for frame designs).
      */
     default boolean commandCapable(T screenConfig) {
         return true;

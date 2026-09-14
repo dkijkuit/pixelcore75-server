@@ -143,13 +143,13 @@ class PanelRotationJobDisabledTests {
         final AnimationLoadAckService ackService = new AnimationLoadAckService(mqttTransport);
         final RotationPlanner planner = new RotationPlanner(config -> config);
         final AnimationTransport transport = new AnimationTransport(
-                imageService, ackService, screenServices, rotationStateService, mqttTransport, false);
+                imageService, ackService, screenServices, rotationStateService, mqttTransport);
         final PreviewStreamer previewStreamer = new PreviewStreamer(
                 imageService, mock(ImageBroadcasterService.class), rotationStateService);
         final CommandPublisher commandPublisher = new CommandPublisher(mqttTransport, rotationStateService, previewStreamer);
         return new PanelRotationJob(panelRepository, panelConfigService, screenServices, planner,
                 transport, commandPublisher, previewStreamer, rotationStateService,
-                jobScheduler, mqttTransport, imageService, false);
+                jobScheduler, mqttTransport, imageService);
     }
 
     private List<Pub> baseTopicPubs() {

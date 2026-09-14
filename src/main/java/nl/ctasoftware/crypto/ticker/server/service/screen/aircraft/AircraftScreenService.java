@@ -12,9 +12,7 @@ import nl.ctasoftware.crypto.ticker.server.service.command.AcmdOpcode;
 import nl.ctasoftware.crypto.ticker.server.service.command.CommandBatch;
 import nl.ctasoftware.crypto.ticker.server.service.command.FontPageExtractor;
 import nl.ctasoftware.crypto.ticker.server.service.command.Rgb565;
-import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbAircraftData;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbRouteData;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AircraftClient;
@@ -26,8 +24,6 @@ import org.springframework.stereotype.Service;
 
 import java.awt.Color;
 import java.awt.Font;
-import java.awt.Graphics2D;
-import java.awt.image.BufferedImage;
 import java.text.Normalizer;
 import java.util.List;
 import java.util.Optional;
@@ -39,29 +35,10 @@ import java.util.concurrent.Executors;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class AircraftScreenService implements FrameScreenService<AircraftScreenConfig>,
-        CommandScreenService<AircraftScreenConfig> {
+public class AircraftScreenService implements CommandScreenService<AircraftScreenConfig> {
 
     public static final int MIN_RADIUS_NM = 5;
     public static final int MAX_RADIUS_NM = 250;
-    public static final int DEFAULT_FRAME_DELAY_MS = 100;
-
-    /**
-     * Target sweep revolution period, independent of the slot length. The radar frame
-     * sequence spans exactly {@link #SWEEP_LOOP_REVOLUTIONS} whole revolutions starting
-     * from a fixed base angle, so it ends exactly where it started: the panel replays
-     * the uploaded frames modulo for the whole slot, and the loop restart is invisible.
-     * A wall-clock phase does NOT work here: playback starts only after the upload
-     * completes, at a variable delay from render time.
-     */
-    static final long SWEEP_REVOLUTION_MS = 4000;
-
-    /**
-     * Whole sweep revolutions per radar loop: the loop covers one full info-page cycle
-     * ({@code SWEEP_LOOP_REVOLUTIONS} × {@link #SWEEP_REVOLUTION_MS}), so both the sweep
-     * and the alternating route page complete whole cycles inside the loop.
-     */
-    static final int SWEEP_LOOP_REVOLUTIONS = 2;
 
     /**
      * The radar's right-hand info column is 30 px wide — too narrow for everything
@@ -87,25 +64,14 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
     static final int INFO_X = 34;
 
     /**
-     * Velocity-vector length in px, drawn from the tracked blip's center along its
-     * track — the classic PPI heading tick. Only the tracked aircraft (the one the
-     * info column describes) carries one: a vector per blip clutters a 14 px scope,
-     * and the tracked blip is where the motion reading belongs. Fixed length (not
-     * speed-scaled) — a speed-proportional vector is unreadable at this size, and
-     * the blip jump between 2 s refreshes is sub-pixel at every radius, so direction
-     * is the only motion information worth rendering.
+     * Tracked-blip size: the closest aircraft paints a solid 3×3 WHITE blip where
+     * every other aircraft gets a 2×2 altitude-colored one — same square language,
+     * unique through size + color alone, nothing else hanging off it.
      */
-    static final int VELOCITY_VECTOR_PX = 3;
-
-    /**
-     * Minimum ground speed (kt) for a velocity vector: below taxi pace the reported
-     * track is noise (hovering helicopters, slow ground rolls mis-flagged airborne).
-     */
-    static final double VELOCITY_VECTOR_MIN_KT = 30;
+    static final int TRACKED_BLIP_SIZE = 3;
 
     static final Color SCOPE_GREEN = new Color(0, 90, 0);
     static final Color SCOPE_RING = new Color(0, 50, 0);
-    static final Color SWEEP_TRAIL = new Color(0, 60, 0);
     static final Color SWEEP_LEAD = new Color(0, 255, 0);
 
     /* --------------------------------------------------------------------
@@ -195,7 +161,6 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
         return (int) Math.max(1, Math.min(255, Math.round(360_000.0 / refreshMs)));
     }
 
-    final PaintToolsService paintToolsService;
     final Font ledBoardFont8Px;
     final Font cgPixel5Px;
     final AircraftClient aircraftClient;
@@ -208,78 +173,6 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
     @Override
     public ScreenType getScreenType() {
         return ScreenType.NEARBY_AIRCRAFT;
-    }
-
-    @Override
-    public Optional<BufferedImage> renderScreen(final AircraftScreenConfig screenConfig) {
-        if (screenConfig.producesFrames()) {
-            final List<BufferedImage> frames = renderFrames(screenConfig);
-            return frames.isEmpty() ? Optional.empty() : Optional.of(frames.getFirst());
-        }
-
-        final List<NearbyAircraft> aircraft = getAircraft(screenConfig);
-        return Optional.of(switch (screenConfig.displayMode()) {
-            case CLOSEST -> aircraft.isEmpty()
-                    ? noAircraftPage()
-                    : closestIdentityPage(aircraft.getFirst(), screenConfig.units());
-            case LIST -> renderList(aircraft, screenConfig.units());
-            case RADAR -> renderRadarStatic(aircraft, screenConfig);
-        });
-    }
-
-    @Override
-    public List<BufferedImage> renderFrames(final AircraftScreenConfig screenConfig) {
-        if (!screenConfig.producesFrames()) {
-            return List.of();
-        }
-
-        final List<NearbyAircraft> aircraft = getAircraft(screenConfig);
-        return screenConfig.displayMode() == AircraftDisplayMode.RADAR
-                ? radarFrames(aircraft, screenConfig)
-                : closestStream(aircraft, screenConfig).frames();
-    }
-
-    @Override
-    public FrameStream renderFrameStream(final AircraftScreenConfig screenConfig) {
-        if (screenConfig.producesFrames() && screenConfig.displayMode() == AircraftDisplayMode.CLOSEST) {
-            return closestStream(getAircraft(screenConfig), screenConfig);
-        }
-        return FrameScreenService.super.renderFrameStream(screenConfig);
-    }
-
-    /* --------------------------------------------------------------------
-     * RADAR frames
-     * ------------------------------------------------------------------ */
-
-    /**
-     * Radar loop frame count: {@link #SWEEP_LOOP_REVOLUTIONS} whole sweep revolutions
-     * covering one full info-page cycle, one frame per delay tick — the slot duration
-     * no longer drives it, because the panel replays the frames modulo for the whole
-     * slot. Clamped to the protocol's 2–200 frame limits.
-     */
-    static int radarFrameCount(final int frameDelayMs) {
-        return Math.max(2, Math.min(200,
-                (int) (SWEEP_LOOP_REVOLUTIONS * SWEEP_REVOLUTION_MS / frameDelayMs)));
-    }
-
-    /**
-     * Sweep angle in integer degrees of 0-based frame {@code frameIndex}: integer steps
-     * of {@code 360 × SWEEP_LOOP_REVOLUTIONS / frameCount}, so the last frame lands on
-     * an exact multiple of 360° and the wrap stays continuous across the modulo loop
-     * boundary (the sweep starts and ends at the same angle).
-     */
-    static int radarSweepDeg(final int frameIndex, final int frameCount) {
-        return (frameIndex + 1) * 360 * SWEEP_LOOP_REVOLUTIONS / frameCount;
-    }
-
-    /**
-     * Info-page index of 0-based frame {@code frameIndex}: the loop's frames spread
-     * evenly over the detail pages (floor division), so the page cycle completes
-     * exactly once per loop and the modulo replay restarts it in phase (each cycle
-     * opens on page 0 = telemetry).
-     */
-    static int radarInfoPage(final int frameIndex, final int frameCount, final int pageCount) {
-        return Math.min(pageCount - 1, (int) ((long) frameIndex * pageCount / frameCount));
     }
 
     /**
@@ -308,22 +201,6 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
         return pages;
     }
 
-    private List<BufferedImage> radarFrames(final List<NearbyAircraft> aircraft,
-                                            final AircraftScreenConfig screenConfig) {
-        final int frameDelayMs = Math.max(FrameScreenConfig.MIN_FRAME_DELAY_MS, screenConfig.frameDelayMs());
-        final int frameCount = radarFrameCount(frameDelayMs);
-
-        final AircraftEnrichment enrichment = enrichClosest(aircraft);
-        final List<RadarInfoPage> pages = radarInfoPages(enrichment);
-
-        final var frames = new java.util.ArrayList<BufferedImage>(frameCount);
-        for (int i = 0; i < frameCount; i++) {
-            frames.add(renderRadarFrame(aircraft, closestOrNull(aircraft), radarSweepDeg(i, frameCount),
-                    screenConfig, enrichment, pages.get(radarInfoPage(i, frameCount, pages.size()))));
-        }
-        return frames;
-    }
-
     /** The tracked radar aircraft — always the closest. Null when the sky is empty. */
     private static NearbyAircraft closestOrNull(final List<NearbyAircraft> aircraft) {
         return aircraft.isEmpty() ? null : aircraft.getFirst();
@@ -331,9 +208,9 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
 
     /**
      * Slot-start data (every render whose result a slot displays: CLOSEST/LIST, the
-     * RADAR first batch and frame loop): a foreground fetch, so the telemetry shown is
-     * as of display time — the SWR cache read would serve the previous fetch's
-     * snapshot to the first reader after a quiet period.
+     * RADAR first batch): a foreground fetch, so the telemetry shown is as of display
+     * time — the SWR cache read would serve the previous fetch's snapshot to the first
+     * reader after a quiet period.
      */
     private List<NearbyAircraft> getAircraft(final AircraftScreenConfig screenConfig) {
         final LatLon latLon = screenConfig.latLon() != null ? screenConfig.latLon() : new LatLon(0, 0);
@@ -346,242 +223,6 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
         final LatLon latLon = screenConfig.latLon() != null ? screenConfig.latLon() : new LatLon(0, 0);
         final int radiusNm = Math.min(MAX_RADIUS_NM, Math.max(MIN_RADIUS_NM, screenConfig.radiusNm()));
         return aircraftClient.getAircraft(latLon, radiusNm, screenConfig.militaryOnly());
-    }
-
-    /* --------------------------------------------------------------------
-     * RADAR
-     * ------------------------------------------------------------------*/
-
-    private BufferedImage renderRadarFrame(final List<NearbyAircraft> aircraft,
-                                           final NearbyAircraft selected,
-                                           final double sweepDeg,
-                                           final AircraftScreenConfig screenConfig,
-                                           final AircraftEnrichment enrichment,
-                                           final RadarInfoPage infoPage) {
-        final BufferedImage image = paintToolsService.newImage();
-        drawScope(image);
-        drawBlips(image, aircraft, selected, sweepDeg, screenConfig);
-        drawSweep(image, sweepDeg);
-        drawInfoColumn(image, selected, screenConfig.units(), enrichment, infoPage);
-        return image;
-    }
-
-    private BufferedImage renderRadarStatic(final List<NearbyAircraft> aircraft,
-                                            final AircraftScreenConfig screenConfig) {
-        return renderRadarFrame(aircraft, closestOrNull(aircraft), 0, screenConfig, null, RadarInfoPage.TELEMETRY);
-    }
-
-    private void drawScope(final BufferedImage image) {
-        final Graphics2D g = (Graphics2D) image.getGraphics();
-        g.setColor(SCOPE_RING);
-        g.drawOval(SCOPE_CX - SCOPE_RADIUS / 2 - 1, SCOPE_CY - SCOPE_RADIUS / 2 - 1, SCOPE_RADIUS + 2, SCOPE_RADIUS + 2);
-        g.setColor(SCOPE_GREEN);
-        g.drawOval(SCOPE_CX - SCOPE_RADIUS, SCOPE_CY - SCOPE_RADIUS, SCOPE_RADIUS * 2, SCOPE_RADIUS * 2);
-        g.setColor(SCOPE_RING);
-        g.drawOval(SCOPE_CX - SCOPE_RADIUS / 2, SCOPE_CY - SCOPE_RADIUS / 2, SCOPE_RADIUS, SCOPE_RADIUS);
-        g.setColor(SCOPE_GREEN);
-        g.fillRect(SCOPE_CX, SCOPE_CY, 1, 1);
-    }
-
-    /**
-     * Blips at the frame path's polar projection in their altitude-band color, lit
-     * when the sweep passed over them, then dimmed but visible. The tracked aircraft
-     * (the one the info column describes) renders last and WHITE — blip plus its
-     * velocity vector — never sweep-dimmed: a selection marker, not data.
-     */
-    private void drawBlips(final BufferedImage image, final List<NearbyAircraft> aircraft,
-                           final NearbyAircraft selected, final double sweepDeg,
-                           final AircraftScreenConfig screenConfig) {
-        final Graphics2D g = (Graphics2D) image.getGraphics();
-        final int radiusNm = Math.max(1, screenConfig.radiusNm());
-        for (final NearbyAircraft a : aircraft) {
-            if (a == selected) {
-                continue;
-            }
-            final double r = Math.min(1.0, a.distanceNm() / radiusNm) * SCOPE_RADIUS;
-            final double rad = Math.toRadians(a.bearingDeg());
-            final int x = SCOPE_CX + (int) Math.round(r * Math.sin(rad));
-            final int y = SCOPE_CY - (int) Math.round(r * Math.cos(rad));
-
-            final Color color = altitudeColor(a);
-            g.setColor(isSwept(a.bearingDeg(), sweepDeg) ? color : dim(color));
-            g.fillRect(x - 1, y - 1, 2, 2);
-        }
-        if (selected != null) {
-            final double r = Math.min(1.0, selected.distanceNm() / radiusNm) * SCOPE_RADIUS;
-            final double rad = Math.toRadians(selected.bearingDeg());
-            final int x = SCOPE_CX + (int) Math.round(r * Math.sin(rad));
-            final int y = SCOPE_CY - (int) Math.round(r * Math.cos(rad));
-            g.setColor(Color.WHITE);
-            g.fillRect(x - 1, y - 1, 2, 2);
-            if (hasVelocityVector(selected)) {
-                final int[] end = vectorEnd(selected.trackDeg(), x, y);
-                g.drawLine(x, y, end[0], end[1]);
-            }
-        }
-    }
-
-    /** Whether the aircraft carries usable motion data for a velocity vector. */
-    static boolean hasVelocityVector(final NearbyAircraft a) {
-        return !a.onGround() && a.trackDeg() != null
-                && a.groundSpeedKt() != null && a.groundSpeedKt() >= VELOCITY_VECTOR_MIN_KT;
-    }
-
-    /**
-     * Velocity-vector endpoint for a blip at ({@code x},{@code y}): the compass-track
-     * direction in the scope's north-up projection (same mapping as the bearing:
-     * 0&deg; = up, clockwise). Callers clip/clamp the endpoint to the canvas — AWT
-     * clips by itself, the command path's u8 LINE coords must stay in range.
-     */
-    static int[] vectorEnd(final double trackDeg, final int x, final int y) {
-        final double rad = Math.toRadians(trackDeg);
-        return new int[]{
-                x + (int) Math.round(VELOCITY_VECTOR_PX * Math.sin(rad)),
-                y - (int) Math.round(VELOCITY_VECTOR_PX * Math.cos(rad))};
-    }
-
-    /** Blips light up as the sweep passes over them, then dim but stay visible. */
-    private static boolean isSwept(final double bearingDeg, final double sweepDeg) {
-        return (sweepDeg - bearingDeg + 360) % 360 < 90;
-    }
-
-    private static Color dim(final Color c) {
-        return new Color(c.getRed() / 3, c.getGreen() / 3, c.getBlue() / 3);
-    }
-
-    private void drawSweep(final BufferedImage image, final double sweepDeg) {
-        final Graphics2D g = (Graphics2D) image.getGraphics();
-        final Color[] trail = {
-                SWEEP_LEAD, new Color(0, 200, 0), new Color(0, 150, 0),
-                new Color(0, 105, 0), new Color(0, 65, 0), SWEEP_TRAIL
-        };
-        for (int k = 0; k < trail.length; k++) {
-            final double deg = sweepDeg - k * 6.0;
-            final double rad = Math.toRadians(deg);
-            final int x = SCOPE_CX + (int) Math.round(SCOPE_RADIUS * Math.sin(rad));
-            final int y = SCOPE_CY - (int) Math.round(SCOPE_RADIUS * Math.cos(rad));
-            g.setColor(trail[k]);
-            g.drawLine(SCOPE_CX, SCOPE_CY, x, y);
-        }
-    }
-
-    private void drawInfoColumn(final BufferedImage image, final NearbyAircraft selected,
-                                final AircraftDisplayUnits units,
-                                final AircraftEnrichment enrichment,
-                                final RadarInfoPage infoPage) {
-        if (selected == null) {
-            paintToolsService.drawText(image, cgPixel5Px, "NO", INFO_X, 11, Color.RED);
-            paintToolsService.drawText(image, cgPixel5Px, "ACFT", INFO_X, 19, Color.RED);
-            return;
-        }
-
-        paintToolsService.drawText(image, cgPixel5Px, truncate(selected.callsign(), 6), INFO_X, 5, Color.WHITE);
-
-        switch (infoPage) {
-            case ROUTE -> {
-                if (enrichment != null && enrichment.hasRoute()) {
-                    paintToolsService.drawText(image, cgPixel5Px, truncate(enrichment.originCode(), 5), INFO_X, 12, Color.GREEN);
-                    paintToolsService.drawText(image, cgPixel5Px, truncate(enrichment.destinationCode(), 5), INFO_X, 19, Color.CYAN);
-                } else {
-                    paintToolsService.drawText(image, cgPixel5Px, "ROUTE", INFO_X, 12, SCOPE_GREEN);
-                    paintToolsService.drawText(image, cgPixel5Px, "UNK", INFO_X, 19, SCOPE_GREEN);
-                }
-                paintToolsService.drawText(image, cgPixel5Px, truncate(orDash(enrichment.owner()), 6), INFO_X, 26, Color.YELLOW);
-            }
-            case REGISTRY -> {
-                paintToolsService.drawText(image, cgPixel5Px, truncate(orDash(enrichment.ownerCountry()), 6), INFO_X, 12, Color.CYAN);
-                paintToolsService.drawText(image, cgPixel5Px, truncate(orDash(enrichment.manufacturer()), 6), INFO_X, 19, Color.WHITE);
-                paintToolsService.drawText(image, cgPixel5Px, truncate(orDash(enrichment.displayType(6)), 6), INFO_X, 26, Color.GREEN);
-            }
-            case TELEMETRY -> {
-                paintToolsService.drawText(image, cgPixel5Px, formatDistance(selected, units), INFO_X, 12, altitudeColor(selected));
-                paintToolsService.drawText(image, cgPixel5Px, formatAltitude(selected, units), INFO_X, 19, Color.CYAN);
-                paintToolsService.drawText(image, cgPixel5Px, formatSpeed(selected, units), INFO_X, 26, Color.YELLOW);
-            }
-        }
-    }
-
-    /* --------------------------------------------------------------------
-     * CLOSEST card (cycling pages)
-     *
-     * Pages are spread equally across the slot: one frame per page, played back at
-     * slot/pageCount. The delay therefore depends on the pages that actually exist
-     * (aircraft present? enrichment available?) and is returned together with the
-     * frames via renderFrameStream. A single page is emitted twice (protocol minimum
-     * of 2 frames), trivially equal.
-     * ------------------------------------------------------------------*/
-
-    private FrameStream closestStream(final List<NearbyAircraft> aircraft,
-                                      final AircraftScreenConfig screenConfig) {
-        final List<BufferedImage> pages = buildClosestPages(aircraft, screenConfig.units());
-        final long slotMillis = screenConfig.durationSeconds() * 1000L;
-
-        final int frameCount = Math.max(2, pages.size());
-        final long dwellMs = Math.max(FrameScreenConfig.MIN_FRAME_DELAY_MS,
-                Math.min(65_535, slotMillis / frameCount));
-
-        final var frames = new java.util.ArrayList<BufferedImage>(frameCount);
-        for (int i = 0; i < frameCount; i++) {
-            frames.add(pages.get(i % pages.size()));
-        }
-        return new FrameStream(frames, dwellMs);
-    }
-
-    private List<BufferedImage> buildClosestPages(final List<NearbyAircraft> aircraft,
-                                                  final AircraftDisplayUnits units) {
-        if (aircraft.isEmpty()) {
-            return List.of(noAircraftPage());
-        }
-
-        final NearbyAircraft closest = aircraft.getFirst();
-        final AircraftEnrichment enrichment = enrichClosest(aircraft);
-
-        final var pages = new java.util.ArrayList<BufferedImage>(3);
-        pages.add(closestIdentityPage(closest, units));
-        if (enrichment != null && enrichment.hasRegistry()) {
-            pages.add(registryPage(enrichment));
-        }
-        if (enrichment != null && enrichment.hasRoute()) {
-            pages.add(routePage(enrichment));
-        }
-        return pages;
-    }
-
-    private BufferedImage noAircraftPage() {
-        final BufferedImage image = paintToolsService.newImage();
-        paintToolsService.drawTextAlignCenter(image, ledBoardFont8Px, "NO ACFT", 15, Color.RED);
-        paintToolsService.drawTextAlignCenter(image, cgPixel5Px, "IN RANGE", 26, Color.RED);
-        return image;
-    }
-
-    /** Page 1: identity + telemetry. */
-    private BufferedImage closestIdentityPage(final NearbyAircraft a, final AircraftDisplayUnits units) {
-        final BufferedImage image = paintToolsService.newImage();
-        paintToolsService.drawText(image, ledBoardFont8Px, truncate(a.callsign(), 7), 0, 8, Color.WHITE);
-        paintToolsService.drawText(image, cgPixel5Px, closestTypeLine(a), 0, 15, Color.CYAN);
-        paintToolsService.drawText(image, cgPixel5Px, closestFlightLine(a, units), 0, 22, Color.GREEN);
-        paintToolsService.drawText(image, cgPixel5Px, closestDistanceLine(a, units), 0, 29, altitudeColor(a));
-        return image;
-    }
-
-    /** Page 2: registry — owner, country, manufacturer, full type. */
-    private BufferedImage registryPage(final AircraftEnrichment enrichment) {
-        final BufferedImage image = paintToolsService.newImage();
-        paintToolsService.drawText(image, cgPixel5Px, truncate(orDash(enrichment.owner()), 12), 0, 6, Color.CYAN);
-        paintToolsService.drawText(image, cgPixel5Px, truncate(orDash(enrichment.ownerCountry()), 12), 0, 13, Color.WHITE);
-        paintToolsService.drawText(image, cgPixel5Px, truncate(orDash(enrichment.manufacturer()), 12), 0, 20, Color.YELLOW);
-        paintToolsService.drawText(image, cgPixel5Px, truncate(orDash(enrichment.displayType(12)), 12), 0, 27, Color.GREEN);
-        return image;
-    }
-
-    /** Page 3: route — airport codes, cities, airline. */
-    private BufferedImage routePage(final AircraftEnrichment enrichment) {
-        final BufferedImage image = paintToolsService.newImage();
-        paintToolsService.drawText(image, cgPixel5Px, truncate(enrichment.originCode() + " -> " + enrichment.destinationCode(), 12), 0, 6, Color.GREEN);
-        paintToolsService.drawText(image, cgPixel5Px, truncate(orDash(enrichment.originCity()), 12), 0, 13, Color.WHITE);
-        paintToolsService.drawText(image, cgPixel5Px, truncate(orDash(enrichment.destinationCity()), 12), 0, 20, Color.WHITE);
-        paintToolsService.drawText(image, cgPixel5Px, truncate(orDash(enrichment.airlineName()), 12), 0, 27, Color.YELLOW);
-        return image;
     }
 
     /**
@@ -601,6 +242,10 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
             return null;
         }
         return enrichAircraft(aircraft.getFirst());
+    }
+
+    private AircraftEnrichment enrichAircraft(final NearbyAircraft aircraft) {
+        return join(enrichAircraftAsync(aircraft)).orElse(null);
     }
 
     private CompletableFuture<Optional<AircraftEnrichment>> enrichAircraftAsync(final NearbyAircraft aircraft) {
@@ -623,10 +268,6 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
                 Optional.ofNullable(AircraftEnrichment.of(d.orElse(null), r.orElse(null), aircraft)));
     }
 
-    private AircraftEnrichment enrichAircraft(final NearbyAircraft aircraft) {
-        return join(enrichAircraftAsync(aircraft)).orElse(null);
-    }
-
     private static <T> Optional<T> join(final CompletableFuture<Optional<T>> leg) {
         try {
             return leg.join();
@@ -642,10 +283,6 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
             cur = cur.getCause();
         }
         return cur.toString();
-    }
-
-    private static String closestTypeLine(final NearbyAircraft a) {
-        return truncate(fullTypeLine(a), 12);
     }
 
     private static String fullTypeLine(final NearbyAircraft a) {
@@ -665,33 +302,10 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
     }
 
     /* --------------------------------------------------------------------
-     * LIST
-     * ------------------------------------------------------------------*/
-
-    private BufferedImage renderList(final List<NearbyAircraft> aircraft, final AircraftDisplayUnits units) {
-        final BufferedImage image = paintToolsService.newImage();
-
-        if (aircraft.isEmpty()) {
-            paintToolsService.drawTextAlignCenter(image, ledBoardFont8Px, "NO ACFT", 15, Color.RED);
-            paintToolsService.drawTextAlignCenter(image, cgPixel5Px, "IN RANGE", 26, Color.RED);
-            return image;
-        }
-
-        final List<NearbyAircraft> top = aircraft.subList(0, Math.min(aircraft.size(), 5));
-        int y = 5;
-        for (final NearbyAircraft a : top) {
-            paintToolsService.drawText(image, cgPixel5Px, truncate(a.callsign(), 7), 0, y, altitudeColor(a));
-            paintToolsService.drawTextAlignRight(image, cgPixel5Px, formatDistance(a, units), y, Color.WHITE);
-            y += 6;
-        }
-        return image;
-    }
-
-    /* --------------------------------------------------------------------
-     * ACMD command path (plan §6): the same data fetch as the frame path,
-     * rendering swapped to ACMD primitives. Every batch starts with CLS
-     * black, embeds its FONT pages, and — for RADAR — ends with one SWEEP
-     * the panel ticks locally: zero per-frame MQTT traffic.
+     * ACMD command path (plan §6): the same data fetch, rendered as ACMD
+     * primitives. Every batch starts with CLS black, embeds its FONT pages,
+     * and — for RADAR — ends with one SWEEP the panel ticks locally: zero
+     * per-frame MQTT traffic.
      * ------------------------------------------------------------------ */
 
     @Override
@@ -903,7 +517,8 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
 
     /**
      * RADAR: CIRC rings + FILL blips (the frame path's projection, the tracked one
-     * WHITE with its velocity vector) + info-column lines (TEXT, or SCROLLs for the
+     * WHITE — a plain 3×3 blip, unique through size + color)
+     * + info-column lines (TEXT, or SCROLLs for the
      * overflowing ones — see {@link #columnLine}) + one SWEEP. {@code selected} is the
      * closest aircraft (null = empty sky); the info column renders the given
      * {@link RadarInfoPage} — the refresh stream rotates pages, a single batch cannot.
@@ -920,9 +535,8 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
 
         // Static blips at the frame path's polar projection, in draw order; fully lit
         // (the command path has no sweep-phase decay — the SWEEP ticks over the static
-        // base). The tracked aircraft renders last and WHITE — blip plus its velocity
-        // vector — matching the frame path's marker exactly. LINE coords are u8: clamp
-        // the endpoint to the canvas, the same clipping AWT applies there.
+        // base). The tracked aircraft renders last as a plain 3×3 WHITE blip — unique
+        // through size + color, no selection box, no ring, no tail.
         final int radiusNm = Math.max(1, screenConfig.radiusNm());
         for (final NearbyAircraft a : aircraft) {
             if (a == selected) {
@@ -939,14 +553,8 @@ public class AircraftScreenService implements FrameScreenService<AircraftScreenC
             final double rad = Math.toRadians(selected.bearingDeg());
             final int x = SCOPE_CX + (int) Math.round(r * Math.sin(rad));
             final int y = SCOPE_CY - (int) Math.round(r * Math.cos(rad));
-            batch.fill(Math.max(1, x - 1), Math.max(1, y - 1), 2, 2, Rgb565.of(Color.WHITE));
-            if (hasVelocityVector(selected)) {
-                final int[] end = vectorEnd(selected.trackDeg(), x, y);
-                batch.line(x, y,
-                        Math.max(0, Math.min(AcmdMirror.WIDTH - 1, end[0])),
-                        Math.max(0, Math.min(AcmdMirror.HEIGHT - 1, end[1])),
-                        Rgb565.of(Color.WHITE));
-            }
+            batch.fill(Math.max(1, x - (TRACKED_BLIP_SIZE / 2)), Math.max(1, y - (TRACKED_BLIP_SIZE / 2)),
+                    TRACKED_BLIP_SIZE, TRACKED_BLIP_SIZE, Rgb565.of(Color.WHITE));
         }
 
         // Info column (the frame path's drawInfoColumn pages): TEXT when a line fits

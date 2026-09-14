@@ -10,7 +10,6 @@ import nl.ctasoftware.crypto.ticker.server.service.panel.AnimationLoadAckService
 import nl.ctasoftware.crypto.ticker.server.service.screen.CommandScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService;
 import nl.ctasoftware.crypto.ticker.server.service.screen.ScreenService;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.awt.image.BufferedImage;
@@ -68,24 +67,16 @@ public class AnimationTransport {
     private final RotationStateService rotationStateService;
     private final MqttTransport mqttTransport;
 
-    /**
-     * {@code pixelcore75.command-encoding.enabled} (default false, mixed-fleet safety):
-     * a next screen that will render via ACMD commands must not get its frame stream staged.
-     */
-    private final boolean commandEncodingEnabled;
-
     public AnimationTransport(final ImageService imageService,
                               final AnimationLoadAckService animationLoadAckService,
                               final ScreenServices screenServices,
                               final RotationStateService rotationStateService,
-                              final MqttTransport mqttTransport,
-                              @Value("${pixelcore75.command-encoding.enabled:false}") final boolean commandEncodingEnabled) {
+                              final MqttTransport mqttTransport) {
         this.imageService = imageService;
         this.animationLoadAckService = animationLoadAckService;
         this.screenServices = screenServices;
         this.rotationStateService = rotationStateService;
         this.mqttTransport = mqttTransport;
-        this.commandEncodingEnabled = commandEncodingEnabled;
     }
 
     /** Raw RGB565 payload bytes per frame — the content hashed by {@link UploadIdHasher}. */
@@ -124,8 +115,7 @@ public class AnimationTransport {
         // That boundary will render via ACMD commands instead (only command-capable configs —
         // CUSTOM frame designs keep ANIM staging): uploading the frame stream now would be
         // dead weight (flash writes for a batch the panel never plays).
-        if (commandEncodingEnabled
-                && screenServices.get(animConfig.screenType()) instanceof CommandScreenService<?>
+        if (screenServices.get(animConfig.screenType()) instanceof CommandScreenService<?>
                 && commandCapable(animConfig.screenType(), animConfig)) {
             return 0;
         }

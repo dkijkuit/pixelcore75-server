@@ -4,8 +4,7 @@ import nl.ctasoftware.crypto.ticker.server.model.panel.config.AircraftScreenConf
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.AircraftScreenConfig.AircraftDisplayMode;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.AircraftScreenConfig.AircraftDisplayUnits;
 import nl.ctasoftware.crypto.ticker.server.model.panel.config.ScreenType;
-import nl.ctasoftware.crypto.ticker.server.service.image.PaintToolsService;
-import nl.ctasoftware.crypto.ticker.server.service.screen.FrameScreenService.FrameStream;
+import nl.ctasoftware.crypto.ticker.server.service.command.FontPageExtractor;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbAircraftData;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AdsbdbRouteData;
 import nl.ctasoftware.crypto.ticker.server.service.screen.aircraft.client.AircraftClient;
@@ -16,7 +15,8 @@ import nl.ctasoftware.crypto.ticker.server.service.screen.weather.LatLon;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.awt.image.BufferedImage;
+import java.awt.Font;
+import java.io.File;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CyclicBarrier;
@@ -29,7 +29,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -37,16 +36,15 @@ import static org.mockito.Mockito.when;
 /**
  * enrichClosest runs its two adsbdb legs concurrently and merges the results; a
  * failing leg degrades to an empty enrichment leg instead of failing the render.
- * Observed through the CLOSEST frame stream: identity page + registry page (details
- * leg) + route page (route leg), so pages = 1 + (details present) + (route present),
- * padded to the protocol minimum of 2 frames.
+ * Observed through the CLOSEST command batches: identity batch + registry batch
+ * (details leg) + route batch (route leg), so batches = 1 + (details present) +
+ * (route present).
  */
 class AircraftScreenServiceEnrichmentTests {
 
     private static final String HEX = "A1F2C3";
     private static final String CALLSIGN = "BAW1";
 
-    private final PaintToolsService paintTools = mock(PaintToolsService.class);
     private final AircraftClient aircraftClient = mock(AircraftClient.class);
     private final AircraftInfoClient infoClient = mock(AircraftInfoClient.class);
 
@@ -54,14 +52,15 @@ class AircraftScreenServiceEnrichmentTests {
 
     @BeforeEach
     void setUp() {
-        when(paintTools.newImage()).thenAnswer(inv -> new BufferedImage(64, 32, BufferedImage.TYPE_INT_RGB));
-        service = new AircraftScreenService(paintTools, null, null, aircraftClient, infoClient);
+        final Font ledBoard = FontPageExtractor.loadFont(new File("assets/fonts/EXEPixelPerfect.ttf"), 16f);
+        final Font cgPixel = FontPageExtractor.loadFont(new File("assets/fonts/cg-pixel-4x5.ttf"), 5f);
+        service = new AircraftScreenService(ledBoard, cgPixel, aircraftClient, infoClient);
     }
 
     @Test
     void bothLegsRunConcurrentlyAndMerge() {
         // Each leg waits at the barrier until the other one started: a sequential
-        // implementation would time out, empty both legs and fail the page count.
+        // implementation would time out, empty both legs and fail the batch count.
         final CyclicBarrier bothStarted = new CyclicBarrier(2);
         givenAircraft();
         when(infoClient.getAircraftDetails(HEX)).thenAnswer(inv -> {
@@ -73,9 +72,9 @@ class AircraftScreenServiceEnrichmentTests {
             return Optional.of(route());
         });
 
-        final FrameStream stream = service.renderFrameStream(config());
+        final var batches = service.renderCommandBatches(config()).batches();
 
-        assertEquals(3, stream.frames().size()); // identity + registry + route pages
+        assertEquals(3, batches.size()); // identity + registry + route pages
         verify(infoClient).getAircraftDetails(HEX);
         verify(infoClient).getRoute(CALLSIGN);
     }
@@ -86,10 +85,10 @@ class AircraftScreenServiceEnrichmentTests {
         when(infoClient.getAircraftDetails(HEX)).thenThrow(new RuntimeException("adsbdb down"));
         when(infoClient.getRoute(CALLSIGN)).thenReturn(Optional.of(route()));
 
-        final FrameStream stream = assertDoesNotThrow(() -> service.renderFrameStream(config()));
+        final var batches = assertDoesNotThrow(() -> service.renderCommandBatches(config()).batches());
 
         // identity + registry (type synthesized from the positional feed's "A319") + route
-        assertEquals(3, stream.frames().size());
+        assertEquals(3, batches.size());
         verify(infoClient).getRoute(CALLSIGN);
     }
 
@@ -99,9 +98,9 @@ class AircraftScreenServiceEnrichmentTests {
         when(infoClient.getAircraftDetails(HEX)).thenReturn(Optional.of(details()));
         when(infoClient.getRoute(CALLSIGN)).thenThrow(new RuntimeException("adsbdb down"));
 
-        final FrameStream stream = assertDoesNotThrow(() -> service.renderFrameStream(config()));
+        final var batches = assertDoesNotThrow(() -> service.renderCommandBatches(config()).batches());
 
-        assertEquals(2, stream.frames().size()); // identity + registry
+        assertEquals(2, batches.size()); // identity + registry
         verify(infoClient).getAircraftDetails(HEX);
     }
 
@@ -111,14 +110,16 @@ class AircraftScreenServiceEnrichmentTests {
         when(infoClient.getAircraftDetails(HEX)).thenReturn(Optional.empty());
         when(infoClient.getRoute(CALLSIGN)).thenReturn(Optional.empty());
 
-        final FrameStream stream = service.renderFrameStream(config());
+        final var batches = service.renderCommandBatches(config()).batches();
 
         // adsbdb knows nothing, but the feed's type code still yields a registry page
-        assertEquals(2, stream.frames().size()); // identity + registry (no route to show)
-        // PaintTools is mocked (blank images), so assert on the drawn registry type
-        // line instead of pixels: y=27 is registryPage's type row, and the identity
-        // page's own type line is "A319 G-TEST" — only the registry line is bare "A319".
-        verify(paintTools).drawText(any(), any(), eq("A319"), eq(0), eq(27), any());
+        assertEquals(2, batches.size()); // identity + registry (no route to show)
+        final List<String> registryTexts = nl.ctasoftware.crypto.ticker.server.service.command.AcmdParser
+                .parse(batches.get(1)).commands().stream()
+                .filter(c -> c instanceof nl.ctasoftware.crypto.ticker.server.service.command.AcmdCommand.Text)
+                .map(c -> ((nl.ctasoftware.crypto.ticker.server.service.command.AcmdCommand.Text) c).ascii())
+                .toList();
+        assertTrue(registryTexts.contains("A319"), () -> registryTexts.toString());
     }
 
     @Test

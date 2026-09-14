@@ -69,8 +69,12 @@ jobrunr:
 
 pixelcore75:
   mqtt:
-    # Broker location (was hardcoded tcp://localhost:1883 in MqttConfig).
+    # Broker location + client id, both env-overridable (deployment off-localhost).
+    # The client id MUST be stable across restarts: the transport connects with
+    # cleanSession(false), so a random per-boot id would orphan a persistent
+    # broker session (plus its queued QoS 1 messages) on every restart.
     broker-url: ${PIXELCORE75_MQTT_BROKER_URL:tcp://localhost:1883}
+    client-id: ${PIXELCORE75_MQTT_CLIENT_ID:pixelcore75-server}
   admin:
     email: admin@localhost
     name: admin
@@ -94,15 +98,11 @@ pixelcore75:
     # values much below ~2000 risk 429s on top of the added polling traffic.
     refresh-ms: ${SPOTIFY_REFRESH_MS:2000}
 
-  # ACMD v1 command encoding (plan §6): screens whose service implements
-  # CommandScreenService publish a command batch to <serial>/cmd instead of frame
-  # uploads. Opt-in, default OFF — old firmware does not subscribe to /cmd. Rollout:
-  # flash ACMD-capable firmware first (backward compatible), then enable.
-  command-encoding:
-    enabled: true
-
   jwt:
-    secret: my-access-secret-change-me-my-access-secret-change-me
-    refresh-secret: my-refresh-secret-change-me-my-refresh-secret-change-me
+    # Secrets come from the environment. Empty default = the dev fallback in
+    # JwtService kicks in; with the "prod" profile active a blank secret is a
+    # hard boot failure (fail-fast, no silent known-secret deploys).
+    secret: ${JWT_SECRET:}
+    refresh-secret: ${JWT_REFRESH_SECRET:}
     access-expiration: 7200000     # 2 HRS
     refresh-expiration: 604800000 # 7 days

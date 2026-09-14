@@ -62,4 +62,81 @@ class Px75PanelServiceTests {
         verify(panelRotationControl, never()).stopBeforeDelete(org.mockito.ArgumentMatchers.anyString());
         verify(panelRepository, never()).deleteById(anyLong());
     }
+
+    /* ------- serial validation (review 2026-08-27: the serial is an MQTT topic base) ------- */
+
+    @Test
+    void addPanelRejectsInvalidSerialCharacters() {
+        var panel = new Px75Panel(null, 42L, "BAD/SERIAL;", "00:00:00:00:00:00", "test", Px75PanelType.P_64_X_32);
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> px75PanelService.addPx75Panel(panel));
+
+        verify(panelRepository, never()).save(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void addPanelRejectsNullSerialInsteadOfThrowingNpe() {
+        var panel = new Px75Panel(null, 42L, null, "00:00:00:00:00:00", "test", Px75PanelType.P_64_X_32);
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> px75PanelService.addPx75Panel(panel));
+
+        verify(panelRepository, never()).save(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void addPanelAcceptsLowercaseAndNormalizes() {
+        var panel = new Px75Panel(null, 42L, "abc-123_x", "00:00:00:00:00:00", "test", Px75PanelType.P_64_X_32);
+        when(panelRepository.save(org.mockito.ArgumentMatchers.any())).thenAnswer(inv -> {
+            final Px75Panel toSave = inv.getArgument(0);
+            toSave.setPanelId(9L); // what IDENTITY generation does
+            return toSave;
+        });
+        when(panelConfigRepository.save(org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(inv -> inv.getArgument(0));
+
+        var saved = px75PanelService.addPx75Panel(panel);
+
+        org.junit.jupiter.api.Assertions.assertEquals("ABC-123_X", saved.getSerial());
+    }
+
+    @Test
+    void addPanelRejectsDuplicateSerial() {
+        when(panelRepository.findBySerialIgnoreCase("PANEL-1"))
+                .thenReturn(Optional.of(new Px75Panel(7L, 1L, "PANEL-1", "00:00:00:00:00:00", "other",
+                        Px75PanelType.P_64_X_32)));
+        var panel = new Px75Panel(null, 42L, "PANEL-1", "00:00:00:00:00:00", "test", Px75PanelType.P_64_X_32);
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> px75PanelService.addPx75Panel(panel));
+
+        verify(panelRepository, never()).save(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void updatePanelRejectsSerialOwnedByAnotherPanel() {
+        when(panelRepository.findBySerialIgnoreCase("OTHER-PANEL"))
+                .thenReturn(Optional.of(new Px75Panel(7L, 1L, "OTHER-PANEL", "00:00:00:00:00:00", "other",
+                        Px75PanelType.P_64_X_32)));
+        var panel = new Px75Panel(1L, 42L, "OTHER-PANEL", "00:00:00:00:00:00", "test", Px75PanelType.P_64_X_32);
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> px75PanelService.updatePx75Panel(panel));
+
+        verify(panelRepository, never()).save(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void updatePanelAllowsKeepingItsOwnSerial() {
+        when(panelRepository.findBySerialIgnoreCase("PANEL-1"))
+                .thenReturn(Optional.of(new Px75Panel(1L, 42L, "PANEL-1", "00:00:00:00:00:00", "test",
+                        Px75PanelType.P_64_X_32)));
+        when(panelRepository.save(org.mockito.ArgumentMatchers.any())).thenAnswer(inv -> inv.getArgument(0));
+        var panel = new Px75Panel(1L, 42L, "PANEL-1", "00:00:00:00:00:00", "renamed", Px75PanelType.P_64_X_32);
+
+        px75PanelService.updatePx75Panel(panel);
+
+        verify(panelRepository).save(panel);
+    }
 }

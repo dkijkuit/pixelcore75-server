@@ -119,6 +119,10 @@ public class ImageService {
             throw new IllegalArgumentException("Unsupported image extension (png, jpg, jpeg, webp, gif)");
         }
 
+        if (cfg.imageUploadData() == null || cfg.imageUploadData().isBlank()) {
+            throw new IllegalArgumentException("imageUploadData is required");
+        }
+
         // Remove prefix if present
         String base64Image = cfg.imageUploadData().contains(",")
                 ? cfg.imageUploadData().split(",")[1]

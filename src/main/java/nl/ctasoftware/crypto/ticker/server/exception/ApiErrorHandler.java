@@ -1,7 +1,9 @@
 // advice/ApiErrorHandler.java
 package nl.ctasoftware.crypto.ticker.server.exception;
 
+import io.jsonwebtoken.JwtException;
 import org.springframework.http.*;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.*;
@@ -30,6 +32,26 @@ public class ApiErrorHandler {
     public ResponseEntity<Map<String, Object>> handleIllegalArg(IllegalArgumentException ex) {
         return ResponseEntity.badRequest().body(Map.of(
                 "status", 400, "error", "Bad Request", "message", ex.getMessage()
+        ));
+    }
+
+    // Bad login (BadCredentialsException) and refresh-token lookups of a meanwhile-
+    // deleted user (UsernameNotFoundException) must be 401, not a 500.
+    @ExceptionHandler(AuthenticationException.class)
+    public ResponseEntity<Map<String, Object>> handleAuthentication(AuthenticationException ex) {
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of(
+                "status", 401, "error", "Unauthorized", "message",
+                ex.getMessage() == null ? "Authentication failed" : ex.getMessage()
+        ));
+    }
+
+    // Expired/malformed/tampered refresh JWTs (POST /v1/auth/refresh reads the cookie
+    // value directly) must be 401 so clients clear the session instead of retrying.
+    @ExceptionHandler(JwtException.class)
+    public ResponseEntity<Map<String, Object>> handleJwt(JwtException ex) {
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of(
+                "status", 401, "error", "Unauthorized", "message",
+                ex.getMessage() == null ? "Invalid or expired token" : ex.getMessage()
         ));
     }
 

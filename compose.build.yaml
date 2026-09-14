@@ -12,7 +12,9 @@ pixelcore75-server:
   ports:
     - "8080:8080"
   healthcheck:
-    test: [ "CMD-SHELL", "wget -qO- http://localhost:${SERVER_PORT} || exit 1" ]
+    # /v1/status is the permitAll health endpoint; the root path answers 401 and
+    # wget exits non-zero, leaving the container permanently unhealthy.
+    test: [ "CMD-SHELL", "wget -qO- http://localhost:$${SERVER_PORT}/v1/status || exit 1" ]
     interval: 30s
     timeout: 5s
     start_period: 15s

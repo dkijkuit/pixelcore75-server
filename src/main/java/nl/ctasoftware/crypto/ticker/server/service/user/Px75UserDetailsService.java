@@ -17,10 +17,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -89,6 +93,15 @@ public class Px75UserDetailsService implements UserDetailsService {
     public Px75User getPx75UserById(long userId) {
         return userRepository.findById(userId)
                 .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+    }
+
+    /** Batch fetch for the admin panel listing (one IN query instead of one per panel). */
+    public Map<Long, Px75User> getPx75UsersByIds(final Collection<Long> userIds) {
+        if (userIds.isEmpty()) {
+            return Map.of();
+        }
+        return userRepository.findAllById(userIds).stream()
+                .collect(Collectors.toMap(Px75User::getId, Function.identity()));
     }
 
     @Cacheable(cacheNames = "usersByUsername", key = "#username")
